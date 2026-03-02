@@ -395,6 +395,11 @@ async def get_swarm_status():
         raise HTTPException(status_code=503, detail="Swarm not initialized")
     
     status = swarm.get_status()
+    # Convert agents dict to list, embedding the agent ID in each entry
+    agents_dict = status.pop("agents", {})
+    status["agents"] = [
+        {"agent_id": aid, **info} for aid, info in agents_dict.items()
+    ]
     return SwarmStatusResponse(**status)
 
 
@@ -766,6 +771,91 @@ async def grade_run_trace(session_id: str, min_score: float = 0.7):
         raise HTTPException(status_code=404, detail="Run not found")
     grade = TraceGrader(min_score=min_score).grade(session_id=session_id, events=events)
     return grade.to_dict()
+
+
+# --- LLM Provider proxy ---------------------------------------------------
+
+class ProviderModelsRequest(BaseModel):
+    provider: str
+    api_key: str = ""
+
+
+class ProviderModelItem(BaseModel):
+    id: str
+    name: str
+    context_length: Optional[int] = None
+
+
+class ProviderModelsResponse(BaseModel):
+    provider: str
+    models: List[ProviderModelItem]
+
+
+PROVIDER_URLS: Dict[str, str] = {
+    "openrouter": "https://openrouter.ai/api/v1/models",
+    "openai": "https://api.openai.com/v1/models",
+    "kilo": "https://api.kilo.ai/api/gateway/models",
+    "anthropic": "https://api.anthropic.com/v1/models",
+}
+
+
+@app.get("/providers")
+async def list_providers():
+    """Return the list of known LLM providers."""
+    return {
+        "providers": [
+            {"id": "openrouter", "name": "OpenRouter", "url": PROVIDER_URLS["openrouter"]},
+            {"id": "openai", "name": "OpenAI", "url": PROVIDER_URLS["openai"]},
+            {"id": "kilo", "name": "Kilo Code", "url": PROVIDER_URLS["kilo"]},
+            {"id": "anthropic", "name": "Anthropic", "url": PROVIDER_URLS["anthropic"]},
+        ]
+    }
+
+
+@app.post("/providers/models", response_model=ProviderModelsResponse)
+async def fetch_provider_models(req: ProviderModelsRequest):
+    """Proxy-fetch the model list from a provider API."""
+    import httpx
+
+    url = PROVIDER_URLS.get(req.provider)
+    if not url:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
+
+    headers: Dict[str, str] = {}
+    if req.api_key:
+        if req.provider == "anthropic":
+            headers["x-api-key"] = req.api_key
+            headers["anthropic-version"] = "2023-06-01"
+        else:
+            headers["Authorization"] = f"Bearer {req.api_key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            body = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=f"Provider returned {exc.response.status_code}: {exc.response.text[:200]}",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach provider: {exc}")
+
+    raw_models = body.get("data", body if isinstance(body, list) else [])
+
+    models = [
+        ProviderModelItem(
+            id=m.get("id", ""),
+            name=m.get("name") or m.get("id", ""),
+            context_length=m.get("context_length"),
+        )
+        for m in raw_models
+        if m.get("id")
+    ]
+
+    models.sort(key=lambda m: m.name.lower())
+    return ProviderModelsResponse(provider=req.provider, models=models)
 
 
 # Run server if executed directly

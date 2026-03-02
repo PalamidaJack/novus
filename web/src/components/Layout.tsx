@@ -8,7 +8,7 @@ import {
   Settings,
   Zap,
 } from 'lucide-react';
-import { cn } from './utils/cn';
+import { cn } from '../utils/cn';
 
 interface LayoutProps {
   children: React.ReactNode;
