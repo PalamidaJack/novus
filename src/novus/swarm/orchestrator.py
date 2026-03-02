@@ -11,7 +11,7 @@ import asyncio
 import random
 import heapq
 from typing import Dict, List, Optional, Set, Tuple, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 import structlog
 
@@ -23,6 +23,10 @@ from novus.core.agent import Agent
 from novus.monitoring import METRICS
 
 logger = structlog.get_logger()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -65,10 +69,11 @@ class SwarmOrchestrator:
         self.pending_tasks: asyncio.Queue[Task] = asyncio.Queue()
         self.task_assignments: Dict[str, str] = {}  # task_id -> agent_id
         self.completed_tasks: Dict[str, Task] = {}
+        self.all_tasks: Dict[str, Task] = {}
         
         # Evolution state
         self.generation = 0
-        self.last_evolution = datetime.utcnow()
+        self.last_evolution = _utcnow()
         
         # Consensus state
         self.proposals: Dict[str, List[Solution]] = {}
@@ -115,6 +120,7 @@ class SwarmOrchestrator:
         
         Returns the task ID for tracking.
         """
+        self.all_tasks[task.id] = task
         await self.pending_tasks.put(task)
         
         # Record metrics
@@ -130,14 +136,14 @@ class SwarmOrchestrator:
     
     async def get_task_result(self, task_id: str, timeout: Optional[float] = None) -> Optional[Task]:
         """Wait for and return task result."""
-        start_time = datetime.utcnow()
+        start_time = _utcnow()
         
         while True:
             if task_id in self.completed_tasks:
                 return self.completed_tasks[task_id]
             
             if timeout:
-                elapsed = (datetime.utcnow() - start_time).total_seconds()
+                elapsed = (_utcnow() - start_time).total_seconds()
                 if elapsed > timeout:
                     return None
             
@@ -305,6 +311,8 @@ class SwarmOrchestrator:
         
         if accepted:
             self.task_assignments[task.id] = best_agent.id
+            self.all_tasks[task.id] = task
+            asyncio.create_task(self._track_task_completion(task))
             logger.info(
                 "task_routed",
                 task_id=task.id,
@@ -313,6 +321,14 @@ class SwarmOrchestrator:
             )
         
         return accepted
+
+    async def _track_task_completion(self, task: Task) -> None:
+        """Track completion lifecycle for routed tasks."""
+        while task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            await asyncio.sleep(0.1)
+
+        self.completed_tasks[task.id] = task
+        self.task_assignments.pop(task.id, None)
     
     def _score_agent_for_task(self, agent: Agent, task: Task) -> float:
         """Score how well an agent matches a task."""
@@ -336,7 +352,7 @@ class SwarmOrchestrator:
         
         # Response time (10%)
         if agent.state.last_heartbeat:
-            seconds_since = (datetime.utcnow() - agent.state.last_heartbeat).total_seconds()
+            seconds_since = (_utcnow() - agent.state.last_heartbeat).total_seconds()
             recency = max(0, 1 - seconds_since / 60)  # 1 minute window
             scores.append(recency * 0.1)
         else:
@@ -501,7 +517,7 @@ class SwarmOrchestrator:
             logger.info("agent_created", agent_id=child.id, generation=self.generation)
         
         self.generation += 1
-        self.last_evolution = datetime.utcnow()
+        self.last_evolution = _utcnow()
         
         logger.info(
             "evolution_completed",

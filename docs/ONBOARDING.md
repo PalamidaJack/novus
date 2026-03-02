@@ -6,10 +6,7 @@
 
 ```bash
 # First time setup
-novus init
-
-# Interactive configuration
-novus setup --interactive
+novus onboard
 ```
 
 ### What Gets Configured
@@ -52,33 +49,19 @@ safety:
 # Set environment variables
 export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
-
-# Or use novus config
-novus config set openai.api_key "sk-..."
 ```
 
-### Step 3: Initialize Knowledge Base
-
-```bash
-# Add documents
-novus knowledge add ./docs/
-novus knowledge add-url https://docs.example.com
-
-# Verify
-novus knowledge list
-```
-
-### Step 4: Test Setup
+### Step 3: Test Setup
 
 ```bash
 # Run diagnostics
 novus doctor
 
-# Test agent
-novus test --agent basic --prompt "Hello, can you help me?"
+# Swarm smoke test
+novus swarm --problem "What is 15 * 23?" --agents 3
 
-# Test swarm
-novus test --swarm --problem "What is 15 * 23?"
+# Full local readiness pipeline
+novus readiness --output-dir .novus-bench
 ```
 
 ---
@@ -101,24 +84,26 @@ novus test --swarm --problem "What is 15 * 23?"
 
 ## First Tasks to Try
 
-### 1. Simple Task
+### 1. Swarm Reasoning
 ```bash
-novus task "Summarize the benefits of Python"
+novus swarm --problem "Summarize the benefits of Python" --agents 3
 ```
 
-### 2. Code Task
+### 2. Planning
 ```bash
-novus code "Write a function to calculate fibonacci"
+novus plan --goal '{"done": true}' --initial '{"done": false}'
 ```
 
-### 3. Research Task
+### 3. API Server
 ```bash
-novus research "Latest developments in quantum computing"
+novus start --port 8000
 ```
 
-### 4. Swarm Task
+### 4. Runtime Artifacts
 ```bash
-novus swarm "Design a database schema for an e-commerce site"
+novus replay <session_id>
+novus export-run <session_id>
+novus verify-run <session_id>
 ```
 
 ---
@@ -127,10 +112,10 @@ novus swarm "Design a database schema for an e-commerce site"
 
 - [ ] Configuration files created
 - [ ] API keys configured
-- [ ] At least one agent tested
-- [ ] Knowledge base initialized (optional)
+- [ ] Swarm smoke test completed
+- [ ] Readiness pipeline completed
 - [ ] Safety settings reviewed
-- [ ] First successful task completed
+- [ ] Benchmark artifacts generated
 
 ---
 
@@ -141,13 +126,13 @@ novus swarm "Design a database schema for an e-commerce site"
 novus --help
 
 # Command help
-novus task --help
+novus swarm --help
 
 # Check status
 novus status
 
-# View logs
-novus logs --tail 100
+# Run diagnostics
+novus doctor
 ```
 
 ---

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 import structlog
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
@@ -26,9 +26,38 @@ from novus.streaming import StreamingAgent, stream_to_sse
 from novus.mcp import mcp_router, get_mcp_server
 from novus.human_in_loop import approval_router, get_approval_manager
 from novus.eval import Evaluator, create_math_suite
+from novus.benchmark import BenchmarkHarness, default_cases
+from novus.runtime.artifacts import RunArtifactLogger
+from novus.runtime.exporter import RunExporter
+from novus.runtime.replay import RunReplayer
+from novus.runtime.verifier import RunBundleVerifier
 from pydantic import BaseModel
 
 logger = structlog.get_logger()
+
+
+class WebSocketManager:
+    """Simple broadcast manager for runtime status updates."""
+
+    def __init__(self):
+        self.connections: set[WebSocket] = set()
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.connections.add(websocket)
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        self.connections.discard(websocket)
+
+    async def broadcast(self, message: Dict[str, Any]) -> None:
+        to_remove: list[WebSocket] = []
+        for ws in self.connections:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                to_remove.append(ws)
+        for ws in to_remove:
+            self.disconnect(ws)
 
 
 class Settings(BaseSettings):
@@ -46,6 +75,11 @@ class Settings(BaseSettings):
 swarm: Optional[SwarmOrchestrator] = None
 world_model: Optional[WorldModel] = None
 world_model_planner: Optional[WorldModelPlanner] = None
+ws_manager = WebSocketManager()
+artifact_logger = RunArtifactLogger()
+run_replayer = RunReplayer()
+run_exporter = RunExporter(artifact_logger=artifact_logger)
+run_verifier = RunBundleVerifier()
 
 
 @asynccontextmanager
@@ -109,6 +143,20 @@ async def metrics_middleware(request: Request, call_next):
         status=response.status_code,
         duration=duration
     )
+
+    # Best-effort live telemetry for web UI.
+    await ws_manager.broadcast(
+        {
+            "type": "api_request",
+            "data": {
+                "method": request.method,
+                "endpoint": request.url.path,
+                "status": response.status_code,
+                "duration_ms": duration * 1000,
+            },
+            "timestamp": time.time(),
+        }
+    )
     
     return response
 
@@ -140,6 +188,15 @@ class TaskResultResponse(BaseModel):
     created_at: datetime
     completed_at: Optional[datetime]
     error: Optional[str] = None
+
+
+class TaskListItem(BaseModel):
+    task_id: str
+    description: str
+    status: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    assigned_agent_id: Optional[str] = None
 
 
 class SwarmStatusResponse(BaseModel):
@@ -202,6 +259,27 @@ async def health():
     }
 
 
+@app.get("/tasks", response_model=List[TaskListItem])
+async def list_tasks():
+    """List known tasks with their current status."""
+    if not swarm:
+        raise HTTPException(status_code=503, detail="Swarm not initialized")
+
+    tasks = list(swarm.all_tasks.values())
+    tasks.sort(key=lambda t: t.created_at, reverse=True)
+    return [
+        TaskListItem(
+            task_id=t.id,
+            description=t.description,
+            status=t.status.value,
+            created_at=t.created_at,
+            completed_at=t.completed_at,
+            assigned_agent_id=t.assigned_agent_id,
+        )
+        for t in tasks
+    ]
+
+
 @app.post("/tasks", response_model=TaskResponse)
 async def submit_task(request: TaskRequest, background_tasks: BackgroundTasks):
     """Submit a task to the swarm."""
@@ -233,6 +311,13 @@ async def submit_task(request: TaskRequest, background_tasks: BackgroundTasks):
     
     # Submit to swarm
     await swarm.submit_task(task)
+    await ws_manager.broadcast(
+        {
+            "type": "task_submitted",
+            "data": {"task_id": task.id, "description": task.description, "status": task.status.value},
+            "timestamp": time.time(),
+        }
+    )
     
     return TaskResponse(
         task_id=task.id,
@@ -353,6 +438,18 @@ app.include_router(mcp_router)
 app.include_router(approval_router)
 
 
+@app.websocket("/ws")
+async def websocket_events(websocket: WebSocket):
+    """WebSocket endpoint for live dashboard events."""
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            _ = await websocket.receive_text()
+            # Keepalive/no-op, client messages currently unused.
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+
+
 # Streaming endpoint
 @app.get("/stream/chat")
 async def stream_chat(message: str):
@@ -379,6 +476,44 @@ class EvalResponse(BaseModel):
     total_tests: int
     passed: int
     results: List[EvalResultItem]
+
+
+class BenchmarkItem(BaseModel):
+    case_name: str
+    category: str
+    passed: bool
+    latency_ms: float
+
+
+class BenchmarkResponse(BaseModel):
+    pass_rate: float
+    total: int
+    results: List[BenchmarkItem]
+
+
+class RunSummaryResponse(BaseModel):
+    session_id: str
+    total_events: int
+    turns: int
+    tool_calls: int
+    errors: int
+    final_answer: Optional[str]
+
+
+class RunExportResponse(BaseModel):
+    session_id: str
+    bundle_dir: str
+    manifest_path: str
+    events_path: str
+    state_path: Optional[str]
+
+
+class RunVerifyResponse(BaseModel):
+    session_id: str
+    ok: bool
+    checksum_ok: bool
+    signature_ok: Optional[bool]
+    errors: List[str]
 
 
 @app.post("/eval/run", response_model=EvalResponse)
@@ -410,6 +545,96 @@ async def run_evaluation():
             }
             for r in results
         ]
+    }
+
+
+@app.post("/benchmark/run", response_model=BenchmarkResponse)
+async def run_benchmark():
+    """Run a compact benchmark suite against an agent runtime."""
+    from novus.core.agent import Agent
+    from novus.core.models import AgentConfig
+
+    agent = Agent(AgentConfig(name="BenchmarkAgent"))
+    harness = BenchmarkHarness(runner=agent.run)
+    report = await harness.run(default_cases())
+    return {
+        "pass_rate": report.pass_rate,
+        "total": len(report.results),
+        "results": [
+            {
+                "case_name": r.case_name,
+                "category": r.category,
+                "passed": r.passed,
+                "latency_ms": r.latency_ms,
+            }
+            for r in report.results
+        ],
+    }
+
+
+@app.get("/runs", response_model=List[str])
+async def list_runs(limit: int = 50):
+    """List recent runtime session IDs with stored artifacts."""
+    return artifact_logger.list_sessions(limit=limit)
+
+
+@app.get("/runs/{session_id}")
+async def get_run_events(session_id: str):
+    """Get raw JSONL event stream for a session."""
+    events = artifact_logger.read(session_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"session_id": session_id, "events": events}
+
+
+@app.get("/runs/{session_id}/summary", response_model=RunSummaryResponse)
+async def get_run_summary(session_id: str):
+    """Replay a run artifact into a concise deterministic summary."""
+    events = artifact_logger.read(session_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="Run not found")
+    summary = run_replayer.summarize(session_id=session_id, events=events)
+    return {
+        "session_id": summary.session_id,
+        "total_events": summary.total_events,
+        "turns": summary.turns,
+        "tool_calls": summary.tool_calls,
+        "errors": summary.errors,
+        "final_answer": summary.final_answer,
+    }
+
+
+@app.post("/runs/{session_id}/export", response_model=RunExportResponse)
+async def export_run_bundle(session_id: str):
+    """Export a portable run bundle (manifest + events + optional state)."""
+    try:
+        exported = run_exporter.export(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return {
+        "session_id": exported.session_id,
+        "bundle_dir": str(exported.bundle_dir),
+        "manifest_path": str(exported.manifest_path),
+        "events_path": str(exported.events_path),
+        "state_path": str(exported.state_path) if exported.state_path else None,
+    }
+
+
+@app.post("/runs/{session_id}/verify", response_model=RunVerifyResponse)
+async def verify_run_bundle(session_id: str, signing_key: Optional[str] = None):
+    """Verify exported run bundle integrity and optional signature."""
+    bundle_dir = run_exporter.export_dir / session_id
+    if not bundle_dir.exists():
+        raise HTTPException(status_code=404, detail="Exported run bundle not found")
+
+    result = run_verifier.verify(bundle_dir=bundle_dir, signing_key=signing_key)
+    return {
+        "session_id": result.session_id,
+        "ok": result.ok,
+        "checksum_ok": result.checksum_ok,
+        "signature_ok": result.signature_ok,
+        "errors": result.errors,
     }
 
 

@@ -8,10 +8,14 @@ serialization, and type safety.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Set, Callable
 from pydantic import BaseModel, Field, ConfigDict
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class TaskStatus(str, Enum):
@@ -73,7 +77,7 @@ class Task(BaseModel):
     constraints: Dict[str, Any] = Field(default_factory=dict)
     
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     assigned_agent_id: Optional[str] = None
@@ -95,19 +99,19 @@ class Task(BaseModel):
     def mark_started(self, agent_id: str) -> None:
         """Mark task as started by an agent."""
         self.status = TaskStatus.RUNNING
-        self.started_at = datetime.utcnow()
+        self.started_at = _utcnow()
         self.assigned_agent_id = agent_id
     
     def mark_completed(self, result: Any) -> None:
         """Mark task as completed with result."""
         self.status = TaskStatus.COMPLETED
-        self.completed_at = datetime.utcnow()
+        self.completed_at = _utcnow()
         self.result = result
     
     def mark_failed(self, error: str) -> None:
         """Mark task as failed with error."""
         self.status = TaskStatus.FAILED
-        self.completed_at = datetime.utcnow()
+        self.completed_at = _utcnow()
         self.result = {"error": error}
 
 
@@ -153,7 +157,7 @@ class AgentState(BaseModel):
     total_compute_time: float = 0.0
     
     # Load metrics
-    last_heartbeat: datetime = Field(default_factory=datetime.utcnow)
+    last_heartbeat: datetime = Field(default_factory=_utcnow)
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
 
@@ -173,7 +177,7 @@ class Solution(BaseModel):
     
     # Provenance
     generated_by: str
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=_utcnow)
     reasoning_trace: Optional[str] = None
     
     # Validation
@@ -188,7 +192,7 @@ class ValidationResult(BaseModel):
     passed: bool
     score: float
     feedback: str
-    validated_at: datetime = Field(default_factory=datetime.utcnow)
+    validated_at: datetime = Field(default_factory=_utcnow)
 
 
 class MemoryEntry(BaseModel):
@@ -204,8 +208,8 @@ class MemoryEntry(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     
     # Temporal
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    last_accessed: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
+    last_accessed: datetime = Field(default_factory=_utcnow)
     access_count: int = 0
     
     # Relationships
@@ -214,7 +218,7 @@ class MemoryEntry(BaseModel):
     
     def touch(self) -> None:
         """Update access metadata."""
-        self.last_accessed = datetime.utcnow()
+        self.last_accessed = _utcnow()
         self.access_count += 1
 
 
@@ -277,6 +281,6 @@ class Experiment(BaseModel):
     analysis: Optional[str] = None
     
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
     executed_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None

@@ -19,13 +19,13 @@
 pip install -e .
 
 # Setup (interactive wizard)
-novus setup --interactive
+novus onboard
 
 # Verify installation
 novus doctor
 
-# Test
-novus test --swarm --prompt "What is 15 * 23?"
+# Quick swarm smoke test
+novus swarm --problem "What is 15 * 23?" --agents 3
 
 # Start using
 novus start
@@ -219,9 +219,65 @@ pytest tests/ --cov=src/novus --cov-report=html
 
 # Run slow tests
 pytest tests/ -m slow
+
+# Environment diagnostics
+novus doctor
+
+# One-command local readiness pipeline
+novus readiness --output-dir .novus-bench
+
+# Optional: run only benchmark gates (skip unit tests)
+novus readiness --output-dir .novus-bench --skip-tests
+
+# Emit machine-readable readiness report
+novus readiness --output-dir .novus-bench --report-json .novus-bench/readiness_report.json
+
+# Shell wrapper equivalent
+./scripts/run_readiness.sh
+
+# Optional: sign exported bundles during readiness
+NOVUS_BUNDLE_SIGNING_KEY=your-key ./scripts/run_readiness.sh
 ```
 
 **Current Status:** 26/26 tests passing ✅
+
+## 📦 Benchmark Artifacts
+
+```bash
+# Run default benchmark cases and export reproducible run bundles
+novus benchmark-export --output-dir .novus-bench
+
+# Optional: sign bundle manifests for tamper-evident verification
+novus benchmark-export --output-dir .novus-bench --signing-key "$NOVUS_BUNDLE_SIGNING_KEY"
+
+# Compare against baseline and emit CI-friendly markdown summary
+novus benchmark-export \
+  --output-dir .novus-bench \
+  --baseline .github/benchmarks/baseline_snapshot.json \
+  --category-thresholds .github/benchmarks/category_thresholds.json \
+  --summary-md .novus-bench/summary.md \
+  --snapshot-out .novus-bench/current_snapshot.json \
+  --max-case-latency-regression-pct 300 \
+  --allow-case-pass-failures 0
+```
+
+Output includes:
+- `.novus-bench/benchmark_report.json`
+- `.novus-bench/bundles/<session_id>/manifest.json`
+- `.novus-bench/bundles/<session_id>/events.jsonl`
+
+```bash
+# Promote a run report to the tracked baseline snapshot
+novus benchmark-promote-baseline \
+  --source .novus-bench/benchmark_report.json \
+  --output .github/benchmarks/baseline_snapshot.json
+
+# Evaluate an existing benchmark report against baseline thresholds
+novus benchmark-evaluate \
+  --report .novus-bench/benchmark_report.json \
+  --baseline .github/benchmarks/baseline_snapshot.json \
+  --category-thresholds .github/benchmarks/category_thresholds.json
+```
 
 ---
 

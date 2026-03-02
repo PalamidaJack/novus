@@ -109,14 +109,14 @@ export function Tasks() {
           <div className="space-y-4">
             {filteredTasks.map((task: any) => (
               <div
-                key={task.id}
+                key={task.task_id}
                 className="p-4 bg-gray-800/50 rounded-lg hover:bg-gray-800 transition-colors"
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <p className="font-medium text-white">{task.description}</p>
                     <div className="mt-2 flex items-center gap-4 text-sm text-gray-400">
-                      <span>ID: {task.id.slice(0, 8)}</span>
+                      <span>ID: {task.task_id.slice(0, 8)}</span>
                       <span>
                         Created: {format(new Date(task.created_at), 'HH:mm:ss')}
                       </span>

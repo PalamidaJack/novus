@@ -1,5 +1,7 @@
 # NOVUS: Complete Review & Testing Report
 
+> Note: This report is historical and may reference older CLI commands (`novus setup`, `novus test`) that have since been replaced by `novus onboard`, `novus doctor`, and `novus readiness`.
+
 **Date:** March 1, 2026  
 **Status:** ✅ Ready for Production Testing
 

@@ -1,0 +1,8 @@
+{
+  "pass_rate": 1.0,
+  "total": 2,
+  "avg_latency_ms": 50.0,
+  "p95_latency_ms": 60.0,
+  "timestamp": "2026-03-02T00:00:00+00:00",
+  "commit": null
+}

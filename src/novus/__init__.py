@@ -13,6 +13,8 @@ from novus.core.models import Task, TaskStatus
 from novus.swarm.orchestrator import SwarmOrchestrator
 from novus.memory.unified import UnifiedMemory
 from novus.llm import LLMClient, get_llm_client
+from novus.runtime import RecursiveAgentRuntime
+from novus.benchmark import BenchmarkHarness
 
 __all__ = [
     "Agent",
@@ -23,4 +25,6 @@ __all__ = [
     "UnifiedMemory",
     "LLMClient",
     "get_llm_client",
+    "RecursiveAgentRuntime",
+    "BenchmarkHarness",
 ]

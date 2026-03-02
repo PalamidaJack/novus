@@ -1,0 +1,6 @@
+{
+  "core_reasoning": {
+    "allow_case_pass_failures": 0,
+    "max_case_latency_regression_pct": 300.0
+  }
+}

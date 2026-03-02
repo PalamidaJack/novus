@@ -11,13 +11,17 @@ import asyncio
 import json
 from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import structlog
 import numpy as np
 
 from novus.core.models import WorldModelPrediction
 
 logger = structlog.get_logger()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -125,13 +129,13 @@ class WorldModel:
         
         This is the core "mental simulation" capability.
         """
-        start_time = datetime.utcnow()
+        start_time = _utcnow()
         
         # Convert to internal representation
         current_state = WorldState(
             state_id="init",
             features=initial_state,
-            timestamp=datetime.utcnow()
+            timestamp=_utcnow()
         )
         
         predicted_states = []
@@ -155,7 +159,7 @@ class WorldModel:
             
             current_state = next_state
         
-        prediction_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        prediction_time = (_utcnow() - start_time).total_seconds() * 1000
         
         return WorldModelPrediction(
             initial_state=initial_state,
@@ -205,7 +209,7 @@ class WorldModel:
         return WorldState(
             state_id=f"step_{len(self.state_history)}",
             features=next_features,
-            timestamp=datetime.utcnow()
+            timestamp=_utcnow()
         )
     
     def _apply_physics(self, state: WorldState, action: Action) -> WorldState:
@@ -331,7 +335,7 @@ class WorldModel:
             WorldState(
                 state_id=f"learn_{i}",
                 features=state,
-                timestamp=datetime.utcnow()
+                timestamp=_utcnow()
             )
             for i, (state, _, _) in enumerate(state_action_pairs)
         ])
