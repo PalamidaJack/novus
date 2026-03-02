@@ -8,6 +8,11 @@ import { Tasks } from './pages/Tasks';
 import { Memory } from './pages/Memory';
 import { Chat } from './pages/Chat';
 import { Settings } from './pages/Settings';
+import { BackgroundRuns } from './pages/BackgroundRuns';
+import { RunHistory } from './pages/RunHistory';
+import { Evaluations } from './pages/Evaluations';
+import { WorldModel } from './pages/WorldModel';
+import { Guardrails } from './pages/Guardrails';
 import { Layout } from './components/Layout';
 import { useWebSocket } from './hooks/useWebSocket';
 
@@ -39,6 +44,11 @@ function App() {
             <Route path="/memory" element={<Memory />} />
             <Route path="/chat" element={<Chat />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/background-runs" element={<BackgroundRuns />} />
+            <Route path="/run-history" element={<RunHistory />} />
+            <Route path="/evaluations" element={<Evaluations />} />
+            <Route path="/world-model" element={<WorldModel />} />
+            <Route path="/guardrails" element={<Guardrails />} />
           </Routes>
         </Layout>
       </BrowserRouter>

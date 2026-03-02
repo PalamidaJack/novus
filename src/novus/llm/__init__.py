@@ -238,15 +238,24 @@ class AnthropicProvider(LLMProvider):
 
 class LLMClient:
     """Unified LLM client with provider selection."""
-    
+
     PROVIDERS = {
         "openai": OpenAIProvider,
         "anthropic": AnthropicProvider,
+        "openrouter": OpenAIProvider,
+        "kilo": OpenAIProvider,
     }
-    
+
+    PROVIDER_BASE_URLS = {
+        "openrouter": "https://openrouter.ai/api/v1",
+        "kilo": "https://api.kilo.ai/api/gateway",
+    }
+
     DEFAULT_MODELS = {
         "openai": "gpt-4",
         "anthropic": "claude-3-opus-20240229",
+        "openrouter": "openai/gpt-4",
+        "kilo": "kilo/auto",
     }
     
     def __init__(
@@ -276,8 +285,9 @@ class LLMClient:
         provider_class = self.PROVIDERS.get(self.provider_name)
         if not provider_class:
             raise ValueError(f"Unknown provider: {provider}")
-        
-        self.provider = provider_class(self.api_key, base_url)
+
+        effective_url = base_url or self.PROVIDER_BASE_URLS.get(self.provider_name)
+        self.provider = provider_class(self.api_key, effective_url)
         
         logger.info(
             "llm_client_initialized",

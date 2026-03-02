@@ -1,32 +1,65 @@
+import { useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Activity,
   Users,
   CheckCircle,
   Clock,
-  TrendingUp,
-  Cpu,
   Brain,
+  Cpu,
+  Zap,
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
+import { ProgressBar } from '../components/ui/ProgressBar';
 import { api } from '../utils/api';
+import { cn } from '../utils/cn';
+import { useWebSocket } from '../hooks/useWebSocket';
+import type { SwarmStatus } from '../types';
 
-const mockMetricsData = [
-  { time: '00:00', tasks: 12, agents: 5 },
-  { time: '04:00', tasks: 18, agents: 5 },
-  { time: '08:00', tasks: 45, agents: 7 },
-  { time: '12:00', tasks: 78, agents: 8 },
-  { time: '16:00', tasks: 92, agents: 10 },
-  { time: '20:00', tasks: 65, agents: 10 },
-  { time: '23:59', tasks: 34, agents: 10 },
-];
+const MAX_CHART_POINTS = 20;
+
+interface ChartPoint {
+  time: string;
+  tasks: number;
+  agents: number;
+}
 
 export function Dashboard() {
-  const { data: status, isLoading } = useQuery({
+  const chartBuffer = useRef<ChartPoint[]>([]);
+  const eventLog = useRef<{ type: string; detail: string; ts: number }[]>([]);
+
+  const { data: status, isLoading } = useQuery<SwarmStatus>({
     queryKey: ['swarm-status'],
     queryFn: () => api.get('/swarm/status').then((r) => r.data),
   });
+
+  const { data: memStats } = useQuery({
+    queryKey: ['memory-stats'],
+    queryFn: () => api.get('/memory/stats').then((r) => r.data),
+  });
+
+  const { lastMessage } = useWebSocket();
+
+  // Track WebSocket events for the activity feed
+  useEffect(() => {
+    if (!lastMessage) return;
+    eventLog.current = [
+      { type: lastMessage.type, detail: JSON.stringify(lastMessage.data).slice(0, 80), ts: lastMessage.timestamp },
+      ...eventLog.current,
+    ].slice(0, 10);
+  }, [lastMessage]);
+
+  // Build ring-buffer time series from polling
+  useEffect(() => {
+    if (!status) return;
+    const now = new Date();
+    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+    chartBuffer.current = [
+      ...chartBuffer.current,
+      { time: timeStr, tasks: status.completed_tasks, agents: status.population },
+    ].slice(-MAX_CHART_POINTS);
+  }, [status]);
 
   if (isLoading) {
     return (
@@ -36,34 +69,44 @@ export function Dashboard() {
     );
   }
 
+  const chartData = chartBuffer.current.length > 1
+    ? chartBuffer.current
+    : [{ time: 'now', tasks: status?.completed_tasks || 0, agents: status?.population || 0 }];
+
+  const totalMemEntries = memStats?.total_entries ?? 0;
+  const memMax = 10000;
+  const memPct = memMax > 0 ? (totalMemEntries / memMax) * 100 : 0;
+  const agentLoad = status ? (status.active_tasks / Math.max(status.population, 1)) * 100 : 0;
+  const pendingRatio = status ? (status.pending_tasks / Math.max(status.completed_tasks + status.pending_tasks, 1)) * 100 : 0;
+
   const stats = [
     {
       title: 'Active Agents',
       value: status?.population || 0,
-      change: '+2 this hour',
+      change: `${status?.active_tasks || 0} busy`,
       icon: Users,
-      trend: 'up',
+      trend: 'up' as const,
     },
     {
       title: 'Tasks Completed',
       value: status?.completed_tasks || 0,
-      change: '+12 today',
+      change: `Gen ${status?.generation || 0}`,
       icon: CheckCircle,
-      trend: 'up',
+      trend: 'up' as const,
     },
     {
       title: 'Pending Tasks',
       value: status?.pending_tasks || 0,
-      change: 'Processing',
+      change: status?.pending_tasks ? 'Processing' : 'Idle',
       icon: Clock,
-      trend: 'neutral',
+      trend: 'neutral' as const,
     },
     {
-      title: 'Avg Task Time',
-      value: '2.4s',
-      change: '-15% vs yesterday',
+      title: 'Active Tasks',
+      value: status?.active_tasks || 0,
+      change: `${status?.population || 0} agents online`,
       icon: Activity,
-      trend: 'down',
+      trend: 'neutral' as const,
     },
   ];
 
@@ -91,7 +134,7 @@ export function Dashboard() {
                     <p className={cn(
                       'mt-1 text-sm',
                       stat.trend === 'up' && 'text-emerald-400',
-                      stat.trend === 'down' && 'text-emerald-400',
+                      stat.trend === 'up' && 'text-emerald-400',
                       stat.trend === 'neutral' && 'text-gray-400'
                     )}>
                       {stat.change}
@@ -119,7 +162,7 @@ export function Dashboard() {
           <CardContent>
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={mockMetricsData}>
+                <AreaChart data={chartData}>
                   <defs>
                     <linearGradient id="colorTasks" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
@@ -156,7 +199,7 @@ export function Dashboard() {
           <CardContent>
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={mockMetricsData}>
+                <LineChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                   <XAxis dataKey="time" stroke="#9ca3af" />
                   <YAxis stroke="#9ca3af" />
@@ -178,50 +221,63 @@ export function Dashboard() {
         </Card>
       </div>
 
-      {/* System Health */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Brain className="h-5 w-5 text-emerald-500" />
-            System Health
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-400">Memory Usage</span>
-                <span className="text-sm font-medium text-white">64%</span>
-              </div>
-              <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-                <div className="h-full w-64 bg-emerald-500 rounded-full" />
-              </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* System Health */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Brain className="h-5 w-5 text-emerald-500" />
+              System Health
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-6">
+              <ProgressBar
+                label="Memory Usage"
+                value={memPct}
+                color={memPct > 80 ? 'red' : memPct > 60 ? 'yellow' : 'emerald'}
+              />
+              <ProgressBar
+                label="Agent Load"
+                value={agentLoad}
+                color={agentLoad > 80 ? 'red' : agentLoad > 50 ? 'yellow' : 'emerald'}
+              />
+              <ProgressBar
+                label="Pending Backlog"
+                value={pendingRatio}
+                color={pendingRatio > 50 ? 'red' : pendingRatio > 25 ? 'yellow' : 'emerald'}
+              />
             </div>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-400">CPU Usage</span>
-                <span className="text-sm font-medium text-white">42%</span>
-              </div>
-              <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-                <div className="h-full w-42 bg-emerald-500 rounded-full" />
-              </div>
+          </CardContent>
+        </Card>
+
+        {/* Recent Activity */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Zap className="h-5 w-5 text-emerald-500" />
+              Recent Activity
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3 max-h-64 overflow-y-auto">
+              {eventLog.current.length === 0 ? (
+                <p className="text-sm text-gray-500 text-center py-4">Waiting for events...</p>
+              ) : (
+                eventLog.current.map((evt, i) => (
+                  <div key={`${evt.ts}-${i}`} className="flex items-start gap-3 p-2 rounded-lg bg-gray-800/50">
+                    <div className="h-2 w-2 mt-1.5 rounded-full bg-emerald-500 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-gray-300 truncate">{evt.type}</p>
+                      <p className="text-xs text-gray-500 truncate">{evt.detail}</p>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-400">API Latency</span>
-                <span className="text-sm font-medium text-white">24ms</span>
-              </div>
-              <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-                <div className="h-full w-24 bg-emerald-500 rounded-full" />
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
-}
-
-function cn(...classes: (string | boolean | undefined)[]) {
-  return classes.filter(Boolean).join(' ');
 }

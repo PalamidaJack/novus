@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import {
   Brain,
   Database,
@@ -7,28 +7,51 @@ import {
   Sparkles,
   Search,
   Zap,
+  Loader2,
 } from 'lucide-react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
+import { Button } from '../components/ui/Button';
+import { Tabs, TabsList, TabsTrigger } from '../components/ui/Tabs';
+import { api } from '../utils/api';
+import { cn } from '../utils/cn';
+import type { MemoryStats, MemorySearchResult } from '../types';
 
-const mockMemoryData = [
-  { time: '00:00', episodic: 120, semantic: 80, procedural: 45 },
-  { time: '04:00', episodic: 145, semantic: 85, procedural: 48 },
-  { time: '08:00', episodic: 180, semantic: 95, procedural: 52 },
-  { time: '12:00', episodic: 220, semantic: 110, procedural: 58 },
-  { time: '16:00', episodic: 245, semantic: 125, procedural: 62 },
-  { time: '20:00', episodic: 280, semantic: 140, procedural: 68 },
-];
+const typeColors: Record<string, string> = {
+  episodic: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
+  semantic: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  procedural: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+  generative: 'bg-pink-500/10 text-pink-400 border-pink-500/20',
+};
 
 export function Memory() {
-  const [activeTab, setActiveTab] = useState('overview');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
 
-  const stats = [
-    { label: 'Total Entries', value: '10,247', icon: Database, color: 'text-blue-400' },
-    { label: 'Episodic', value: '5,832', icon: Clock, color: 'text-purple-400' },
-    { label: 'Semantic', value: '3,120', icon: Brain, color: 'text-emerald-400' },
-    { label: 'Generative', value: '1,295', icon: Sparkles, color: 'text-pink-400' },
+  const { data: stats, isLoading: statsLoading } = useQuery<MemoryStats>({
+    queryKey: ['memory-stats'],
+    queryFn: () => api.get('/memory/stats').then((r) => r.data),
+  });
+
+  const searchMutation = useMutation({
+    mutationFn: (query: string) =>
+      api.post('/memory/search', {
+        query,
+        memory_types: typeFilter === 'all' ? null : [typeFilter],
+        k: 20,
+      }).then((r) => r.data),
+  });
+
+  const handleSearch = () => {
+    if (!searchQuery.trim()) return;
+    searchMutation.mutate(searchQuery);
+  };
+
+  const statCards = [
+    { label: 'Total Entries', value: stats?.total_entries ?? 0, icon: Database, color: 'text-blue-400' },
+    { label: 'Episodic', value: stats?.episodic ?? 0, icon: Clock, color: 'text-purple-400' },
+    { label: 'Semantic', value: stats?.semantic ?? 0, icon: Brain, color: 'text-emerald-400' },
+    { label: 'Procedural', value: stats?.procedural ?? 0, icon: Sparkles, color: 'text-pink-400' },
   ];
 
   return (
@@ -43,7 +66,7 @@ export function Memory() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-        {stats.map((stat) => {
+        {statCards.map((stat) => {
           const Icon = stat.icon;
           return (
             <Card key={stat.label}>
@@ -52,7 +75,7 @@ export function Memory() {
                   <div>
                     <p className="text-sm text-gray-400">{stat.label}</p>
                     <p className={cn('mt-2 text-3xl font-bold', stat.color)}>
-                      {stat.value}
+                      {statsLoading ? '...' : stat.value.toLocaleString()}
                     </p>
                   </div>
                   <div className="p-3 bg-gray-800 rounded-lg">
@@ -65,52 +88,6 @@ export function Memory() {
         })}
       </div>
 
-      {/* Memory Growth Chart */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Brain className="h-5 w-5 text-emerald-500" />
-            Memory Growth Over Time
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={mockMemoryData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                <XAxis dataKey="time" stroke="#9ca3af" />
-                <YAxis stroke="#9ca3af" />
-                <Tooltip
-                  contentStyle={{ backgroundColor: '#1f2937', border: 'none' }}
-                  labelStyle={{ color: '#9ca3af' }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="episodic"
-                  name="Episodic"
-                  stroke="#a855f7"
-                  strokeWidth={2}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="semantic"
-                  name="Semantic"
-                  stroke="#10b981"
-                  strokeWidth={2}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="procedural"
-                  name="Procedural"
-                  stroke="#3b82f6"
-                  strokeWidth={2}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* Memory Search */}
       <Card>
         <CardHeader>
@@ -119,47 +96,81 @@ export function Memory() {
             Memory Explorer
           </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {/* Type Filter Tabs */}
+          <Tabs value={typeFilter} onValueChange={setTypeFilter}>
+            <TabsList>
+              <TabsTrigger value="all">All</TabsTrigger>
+              <TabsTrigger value="episodic">Episodic</TabsTrigger>
+              <TabsTrigger value="semantic">Semantic</TabsTrigger>
+              <TabsTrigger value="procedural">Procedural</TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          {/* Search Input */}
           <div className="flex gap-4">
             <input
               type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
               placeholder="Search memories..."
               className="flex-1 px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500"
             />
-            <button className="px-6 py-3 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-medium transition-colors flex items-center gap-2">
-              <Zap className="h-4 w-4" />
+            <Button
+              onClick={handleSearch}
+              disabled={searchMutation.isPending || !searchQuery.trim()}
+              className="flex items-center gap-2"
+            >
+              {searchMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Zap className="h-4 w-4" />
+              )}
               Search
-            </button>
+            </Button>
           </div>
 
-          <div className="mt-6 space-y-3">
-            {[1, 2, 3].map((i) => (
+          {/* Search Results */}
+          <div className="space-y-3">
+            {searchMutation.data?.results?.map((result: MemorySearchResult, i: number) => (
               <div key={i} className="p-4 bg-gray-800/50 rounded-lg">
                 <div className="flex items-start justify-between">
-                  <div>
-                    <p className="text-sm text-white">
-                      Task execution experience: Successfully analyzed data from 3 sources...
-                    </p>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-white">{result.content}</p>
                     <div className="mt-2 flex items-center gap-3">
-                      <Badge variant="outline" className="bg-purple-500/10 text-purple-400 border-purple-500/20">
-                        Episodic
+                      <Badge variant="outline" className={typeColors[result.memory_type] || 'border-gray-700 text-gray-400'}>
+                        {result.memory_type}
                       </Badge>
                       <span className="text-xs text-gray-500">
-                        Accessed: 2 hours ago
+                        via {result.retrieval_method}
                       </span>
+                      {result.created_at && (
+                        <span className="text-xs text-gray-500">
+                          {new Date(result.created_at).toLocaleString()}
+                        </span>
+                      )}
                     </div>
                   </div>
-                  <span className="text-xs text-gray-500">Score: 0.89</span>
+                  <span className="text-xs text-gray-500 ml-4 shrink-0">
+                    Score: {result.relevance_score.toFixed(2)}
+                  </span>
                 </div>
               </div>
             ))}
+
+            {searchMutation.data?.results?.length === 0 && (
+              <div className="text-center py-8 text-gray-500">No memories found</div>
+            )}
+
+            {!searchMutation.data && !searchMutation.isPending && (
+              <div className="text-center py-8 text-gray-500">
+                Enter a search query to explore memories
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
     </div>
   );
-}
-
-function cn(...classes: (string | boolean | undefined)[]) {
-  return classes.filter(Boolean).join(' ');
 }

@@ -1,8 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Sparkles, Bot, User, Loader2 } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { Send, Sparkles, Bot, User, Loader2, Settings2, ChevronUp, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '../components/ui/Button';
+import { Card, CardContent } from '../components/ui/Card';
+import { Slider } from '../components/ui/Slider';
 import { api } from '../utils/api';
+import { cn } from '../utils/cn';
 
 interface Message {
   id: string;
@@ -27,7 +31,15 @@ export function Chat() {
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [showConfig, setShowConfig] = useState(false);
+  const [numAgents, setNumAgents] = useState(3);
+  const [consensusThreshold, setConsensusThreshold] = useState(0.75);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const { data: llmConfig } = useQuery({
+    queryKey: ['llm-config'],
+    queryFn: () => api.get('/config/llm').then((r) => r.data),
+  });
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -53,11 +65,10 @@ export function Chat() {
     setIsLoading(true);
 
     try {
-      // Use collective solve for complex queries
       const response = await api.post('/swarm/solve', {
         problem: input,
-        num_agents: 3,
-        consensus_threshold: 0.75,
+        num_agents: numAgents,
+        consensus_threshold: consensusThreshold,
       });
 
       const assistantMessage: Message = {
@@ -95,12 +106,64 @@ export function Chat() {
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)]">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold text-white">Chat with NOVUS</h1>
-        <p className="mt-2 text-gray-400">
-          Interact with the swarm using natural language
-        </p>
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-white">Chat with NOVUS</h1>
+          <p className="mt-2 text-gray-400">
+            Interact with the swarm using natural language
+          </p>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setShowConfig(!showConfig)}
+          className="flex items-center gap-2 text-gray-400"
+        >
+          <Settings2 className="h-4 w-4" />
+          Config
+          {showConfig ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+        </Button>
       </div>
+
+      {/* Collapsible Config Panel */}
+      <AnimatePresence>
+        {showConfig && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden mb-4"
+          >
+            <Card>
+              <CardContent className="p-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <Slider
+                    label="Agent Count"
+                    value={numAgents}
+                    onChange={setNumAgents}
+                    min={1}
+                    max={20}
+                  />
+                  <Slider
+                    label="Consensus Threshold"
+                    value={consensusThreshold}
+                    onChange={setConsensusThreshold}
+                    min={0}
+                    max={1}
+                    step={0.05}
+                  />
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-gray-300">Active Model</label>
+                    <p className="text-sm text-emerald-400 font-mono">
+                      {llmConfig?.model || llmConfig?.provider || 'Not configured'}
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto space-y-6 pr-4">
@@ -139,7 +202,7 @@ export function Chat() {
                 )}
               >
                 <p className="whitespace-pre-wrap">{message.content}</p>
-                
+
                 {message.metadata && (
                   <div className="mt-3 pt-3 border-t border-gray-700/50 flex items-center gap-4 text-xs">
                     {message.metadata.agents_used && (
@@ -155,7 +218,7 @@ export function Chat() {
                     )}
                   </div>
                 )}
-                
+
                 <span
                   className={cn(
                     'block mt-2 text-xs',
@@ -231,8 +294,4 @@ export function Chat() {
       </div>
     </div>
   );
-}
-
-function cn(...classes: (string | boolean | undefined)[]) {
-  return classes.filter(Boolean).join(' ');
 }

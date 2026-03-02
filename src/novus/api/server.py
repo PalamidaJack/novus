@@ -34,6 +34,8 @@ from novus.runtime.replay import RunReplayer
 from novus.runtime.trace_grade import TraceGrader
 from novus.runtime.verifier import RunBundleVerifier
 from novus.runtime.background import BackgroundRunManager
+from novus.memory.unified import UnifiedMemory
+from novus.guardrails import Guardrails, GuardrailRule, GuardrailType
 from pydantic import BaseModel
 
 logger = structlog.get_logger()
@@ -77,6 +79,12 @@ class Settings(BaseSettings):
 # Global state
 swarm: Optional[SwarmOrchestrator] = None
 world_model: Optional[WorldModel] = None
+# Runtime LLM config – updated from the Settings panel
+llm_config: Dict[str, str] = {
+    "provider": "",
+    "api_key": "",
+    "model": "",
+}
 world_model_planner: Optional[WorldModelPlanner] = None
 ws_manager = WebSocketManager()
 artifact_logger = RunArtifactLogger()
@@ -84,12 +92,32 @@ run_replayer = RunReplayer()
 run_exporter = RunExporter(artifact_logger=artifact_logger)
 run_verifier = RunBundleVerifier()
 background_runs: Optional[BackgroundRunManager] = None
+memory: Optional[UnifiedMemory] = None
+guardrails_engine: Optional[Guardrails] = None
+
+# Platform-level config persisted across restarts (in-memory for now)
+platform_config: Dict[str, Any] = {
+    "swarm": {
+        "target_agent_count": 5,
+        "enable_evolution": False,
+        "mutation_rate": 0.1,
+        "consensus_threshold": 0.75,
+        "selection_pressure": 0.3,
+    },
+    "execution": {
+        "sandbox_profile": "standard",
+        "timeout_seconds": 300,
+        "enable_network": True,
+        "enable_computer_use": False,
+    },
+    "guardrails": [],  # list of per-rule overrides
+}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    global swarm, world_model, world_model_planner, background_runs
+    global swarm, world_model, world_model_planner, background_runs, memory, guardrails_engine
     
     # Startup
     logger.info("starting_novus_api")
@@ -104,6 +132,10 @@ async def lifespan(app: FastAPI):
     # Initialize world model
     world_model = WorldModel()
     world_model_planner = WorldModelPlanner(world_model)
+
+    # Initialize memory and guardrails
+    memory = UnifiedMemory()
+    guardrails_engine = Guardrails()
 
     bridge = get_a2a_bridge()
 
@@ -856,6 +888,272 @@ async def fetch_provider_models(req: ProviderModelsRequest):
 
     models.sort(key=lambda m: m.name.lower())
     return ProviderModelsResponse(provider=req.provider, models=models)
+
+
+# --- LLM runtime config ---------------------------------------------------
+
+class LLMConfigPayload(BaseModel):
+    provider: str
+    api_key: str = ""
+    model: str = ""
+
+
+@app.get("/config/llm")
+async def get_llm_config():
+    """Return the current LLM config (key masked)."""
+    masked_key = ""
+    if llm_config["api_key"]:
+        k = llm_config["api_key"]
+        masked_key = k[:4] + "..." + k[-4:] if len(k) > 8 else "***"
+    return {
+        "provider": llm_config["provider"],
+        "model": llm_config["model"],
+        "api_key_set": bool(llm_config["api_key"]),
+        "api_key_masked": masked_key,
+    }
+
+
+@app.post("/config/llm")
+async def set_llm_config(payload: LLMConfigPayload):
+    """Save the active LLM provider, model, and API key.
+
+    Also injects the key into the process environment so that
+    ``get_llm_client`` picks it up for all subsequent agent calls.
+    """
+    import os
+    from novus.llm import clear_llm_cache
+
+    llm_config["provider"] = payload.provider
+    llm_config["model"] = payload.model
+    llm_config["api_key"] = payload.api_key
+
+    # Expose the key as an env-var so get_llm_client finds it automatically.
+    env_var = f"{payload.provider.upper()}_API_KEY"
+    if payload.api_key:
+        os.environ[env_var] = payload.api_key
+    elif env_var in os.environ:
+        del os.environ[env_var]
+
+    # Flush the cached LLM clients so the next call uses the new config.
+    clear_llm_cache()
+
+    # Push the new provider/model into every running swarm agent so
+    # subsequent collective_solve calls use the chosen LLM.
+    if swarm:
+        for agent in swarm.agents.values():
+            agent.config.llm_provider = payload.provider
+            if payload.model:
+                agent.config.model_name = payload.model
+
+    logger.info(
+        "llm_config_updated",
+        provider=payload.provider,
+        model=payload.model,
+        key_set=bool(payload.api_key),
+    )
+
+    return {"status": "ok", "provider": payload.provider, "model": payload.model}
+
+
+# --- Platform config endpoints -----------------------------------------------
+
+class SwarmConfigPayload(BaseModel):
+    target_agent_count: int = Field(default=5, ge=1, le=50)
+    enable_evolution: bool = False
+    mutation_rate: float = Field(default=0.1, ge=0.0, le=1.0)
+    consensus_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    selection_pressure: float = Field(default=0.3, ge=0.0, le=1.0)
+
+
+@app.get("/config/swarm")
+async def get_swarm_config():
+    return platform_config["swarm"]
+
+
+@app.post("/config/swarm")
+async def set_swarm_config(payload: SwarmConfigPayload):
+    platform_config["swarm"] = payload.model_dump()
+    # Apply to running swarm
+    if swarm:
+        swarm.config.target_agent_count = payload.target_agent_count
+        swarm.config.enable_evolution = payload.enable_evolution
+        swarm.config.mutation_rate = payload.mutation_rate
+        swarm.config.consensus_threshold = payload.consensus_threshold
+        swarm.config.selection_pressure = payload.selection_pressure
+    logger.info("swarm_config_updated", config=platform_config["swarm"])
+    return {"status": "ok", **platform_config["swarm"]}
+
+
+class ExecutionConfigPayload(BaseModel):
+    sandbox_profile: str = Field(default="standard", pattern="^(standard|restricted|permissive)$")
+    timeout_seconds: int = Field(default=300, ge=10, le=3600)
+    enable_network: bool = True
+    enable_computer_use: bool = False
+
+
+@app.get("/config/execution")
+async def get_execution_config():
+    return platform_config["execution"]
+
+
+@app.post("/config/execution")
+async def set_execution_config(payload: ExecutionConfigPayload):
+    platform_config["execution"] = payload.model_dump()
+    logger.info("execution_config_updated", config=platform_config["execution"])
+    return {"status": "ok", **platform_config["execution"]}
+
+
+class GuardrailRuleOverride(BaseModel):
+    name: str
+    enabled: bool = True
+    action: str = Field(default="block", pattern="^(block|warn|truncate|redact)$")
+    severity: str = Field(default="high", pattern="^(low|medium|high|critical)$")
+
+
+class GuardrailsConfigPayload(BaseModel):
+    rules: List[GuardrailRuleOverride]
+
+
+@app.get("/config/guardrails")
+async def get_guardrails_config():
+    if not guardrails_engine:
+        raise HTTPException(status_code=503, detail="Guardrails not initialized")
+    stats = guardrails_engine.get_stats()
+    rules = []
+    for rule in guardrails_engine.rules.values():
+        rules.append({
+            "name": rule.name,
+            "type": rule.guardrail_type.value if hasattr(rule.guardrail_type, 'value') else str(rule.guardrail_type),
+            "enabled": rule.enabled,
+            "action": rule.action,
+            "severity": rule.severity,
+        })
+    return {"stats": stats, "rules": rules}
+
+
+@app.post("/config/guardrails")
+async def set_guardrails_config(payload: GuardrailsConfigPayload):
+    if not guardrails_engine:
+        raise HTTPException(status_code=503, detail="Guardrails not initialized")
+    platform_config["guardrails"] = [r.model_dump() for r in payload.rules]
+    # Apply overrides to the engine rules
+    rule_map = {r.name: r for r in payload.rules}
+    for rule in guardrails_engine.rules.values():
+        if rule.name in rule_map:
+            override = rule_map[rule.name]
+            rule.enabled = override.enabled
+            rule.action = override.action
+            rule.severity = override.severity
+    logger.info("guardrails_config_updated", rule_count=len(payload.rules))
+    return {"status": "ok", "rules_updated": len(payload.rules)}
+
+
+# --- Memory endpoints ---------------------------------------------------------
+
+@app.get("/memory/stats")
+async def get_memory_stats():
+    if not memory:
+        raise HTTPException(status_code=503, detail="Memory not initialized")
+    return memory.get_stats()
+
+
+class MemorySearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=2000)
+    memory_types: Optional[List[str]] = None
+    k: int = Field(default=10, ge=1, le=50)
+
+
+@app.post("/memory/search")
+async def search_memory(request: MemorySearchRequest):
+    if not memory:
+        raise HTTPException(status_code=503, detail="Memory not initialized")
+    from novus.core.models import MemoryType
+    types = None
+    if request.memory_types:
+        try:
+            types = [MemoryType(t) for t in request.memory_types]
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid memory type: {e}")
+    results = await memory.retrieve(
+        query=request.query,
+        memory_types=types,
+        k=request.k,
+    )
+    return {
+        "query": request.query,
+        "results": [
+            {
+                "content": r.entry.content,
+                "memory_type": r.entry.memory_type.value if hasattr(r.entry.memory_type, 'value') else str(r.entry.memory_type),
+                "relevance_score": r.relevance_score,
+                "retrieval_method": r.retrieval_method,
+                "created_at": r.entry.created_at.isoformat() if hasattr(r.entry, 'created_at') else None,
+            }
+            for r in results
+        ],
+    }
+
+
+# --- Agent spawn endpoint ----------------------------------------------------
+
+class SpawnAgentRequest(BaseModel):
+    name: str = Field(default="NewAgent", min_length=1, max_length=100)
+    capabilities: List[str] = Field(default_factory=lambda: ["reasoning"])
+    llm_provider: str = ""
+    model_name: str = ""
+
+
+@app.post("/swarm/spawn")
+async def spawn_agent(request: SpawnAgentRequest):
+    if not swarm:
+        raise HTTPException(status_code=503, detail="Swarm not initialized")
+    from novus.core.agent import Agent
+    from novus.core.models import AgentConfig
+
+    try:
+        caps = {AgentCapability(c) for c in request.capabilities}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid capability: {e}")
+
+    config = AgentConfig(
+        name=request.name,
+        capabilities=caps,
+        llm_provider=request.llm_provider or llm_config.get("provider", "openai"),
+        model_name=request.model_name or llm_config.get("model", "gpt-4"),
+    )
+    agent = Agent(config)
+    swarm.agents[config.id] = agent
+    swarm.config.target_agent_count = len(swarm.agents)
+    await ws_manager.broadcast({
+        "type": "agent_spawned",
+        "data": {"agent_id": config.id, "name": request.name},
+        "timestamp": time.time(),
+    })
+    logger.info("agent_spawned", agent_id=config.id, name=request.name)
+    return {"status": "ok", "agent_id": config.id, "name": request.name}
+
+
+# --- Task cancel endpoint -----------------------------------------------------
+
+@app.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    if not swarm:
+        raise HTTPException(status_code=503, detail="Swarm not initialized")
+    task = swarm.all_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status.value in ("completed", "failed"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel task with status: {task.status.value}")
+    from novus.core.models import TaskStatus
+    task.status = TaskStatus.FAILED
+    task.result = {"error": "Cancelled by user"}
+    task.completed_at = datetime.utcnow()
+    await ws_manager.broadcast({
+        "type": "task_cancelled",
+        "data": {"task_id": task_id},
+        "timestamp": time.time(),
+    })
+    return {"task_id": task_id, "cancelled": True}
 
 
 # Run server if executed directly
