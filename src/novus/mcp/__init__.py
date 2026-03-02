@@ -9,12 +9,38 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Dict, List, Optional, Any, Callable, AsyncIterator
+from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import structlog
 
 logger = structlog.get_logger()
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
+class MCPAuthPolicy:
+    """Basic MCP auth hardening controls."""
+
+    require_bearer_token: bool = False
+    expected_audience: Optional[str] = None
+    allowed_origins: Optional[list[str]] = None
+
+    def validate(self, authorization: Optional[str], origin: Optional[str], audience: Optional[str]) -> Optional[str]:
+        if self.require_bearer_token and not authorization:
+            return "missing_bearer_token"
+        if authorization and not authorization.lower().startswith("bearer "):
+            return "invalid_authorization_header"
+        if self.expected_audience and audience and audience != self.expected_audience:
+            return "invalid_token_audience"
+        if self.allowed_origins and origin:
+            allowed = {o.lower() for o in self.allowed_origins}
+            if origin.lower() not in allowed:
+                return "origin_not_allowed"
+        return None
 
 
 @dataclass
@@ -95,12 +121,18 @@ class MCPServer:
     Allows other agents/tools to discover and use NOVUS functionality.
     """
     
-    def __init__(self, name: str = "novus-mcp-server", version: str = "0.1.0"):
+    def __init__(
+        self,
+        name: str = "novus-mcp-server",
+        version: str = "0.1.0",
+        auth_policy: Optional[MCPAuthPolicy] = None,
+    ):
         self.name = name
         self.version = version
         self.tools: Dict[str, MCPTool] = {}
         self.resources: Dict[str, MCPResource] = {}
         self.prompts: Dict[str, MCPPrompt] = {}
+        self.auth_policy = auth_policy or MCPAuthPolicy()
         
         logger.info("mcp_server_initialized", name=name, version=version)
     
@@ -233,7 +265,7 @@ class MCPServer:
     def _handle_initialize(self) -> Dict[str, Any]:
         """Handle initialize request."""
         return {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-11-25",
             "serverInfo": {
                 "name": self.name,
                 "version": self.version
@@ -242,7 +274,18 @@ class MCPServer:
                 "tools": {"listChanged": True},
                 "resources": {"listChanged": True, "subscribe": True},
                 "prompts": {"listChanged": True}
-            }
+            },
+            "transport": {
+                "mode": "streamable_http",
+                "resumable": True,
+                "originValidation": bool(self.auth_policy.allowed_origins),
+            },
+            "security": {
+                "pkce_required": True,
+                "token_passthrough": False,
+                "audience_bound": bool(self.auth_policy.expected_audience),
+            },
+            "timestamp": _utcnow_iso(),
         }
     
     def _handle_tools_list(self) -> Dict[str, Any]:
@@ -419,7 +462,15 @@ class MCPClient:
 # Example usage and built-in tools
 def create_novus_mcp_server() -> MCPServer:
     """Create a NOVUS MCP server with built-in tools."""
-    server = MCPServer(name="novus", version="0.1.0")
+    server = MCPServer(
+        name="novus",
+        version="0.1.0",
+        auth_policy=MCPAuthPolicy(
+            require_bearer_token=False,
+            expected_audience="novus-mcp",
+            allowed_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
+        ),
+    )
     
     @server.register_tool(
         name="web_search",
@@ -523,12 +574,21 @@ def get_mcp_server() -> MCPServer:
 async def mcp_rpc(request: Request):
     """MCP JSON-RPC endpoint."""
     try:
-        body = await request.json()
         server = get_mcp_server()
+        auth_header = request.headers.get("authorization")
+        origin = request.headers.get("origin")
+        audience = request.headers.get("x-mcp-resource")
+        auth_error = server.auth_policy.validate(auth_header, origin, audience)
+        if auth_error:
+            raise HTTPException(status_code=401, detail=f"mcp_auth_failed:{auth_error}")
+
+        body = await request.json()
         result = await server.handle_request(body)
         return JSONResponse(result)
     except Exception as e:
         logger.error("mcp_rpc_error", error=str(e))
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(status_code=500, detail=str(e))
 
 @mcp_router.get("/tools")

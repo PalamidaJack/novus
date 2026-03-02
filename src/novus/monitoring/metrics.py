@@ -7,6 +7,7 @@ Integrates Prometheus for metrics collection and OpenTelemetry for tracing.
 from __future__ import annotations
 
 import time
+import asyncio
 from typing import Callable, Optional
 from functools import wraps
 
@@ -170,6 +171,13 @@ API_REQUEST_DURATION = Histogram(
     registry=REGISTRY
 )
 
+RUNTIME_SPANS = Counter(
+    "novus_runtime_spans_total",
+    "Runtime span-like events (OTEL-style semantic grouping)",
+    ["span_name", "status"],
+    registry=REGISTRY,
+)
+
 
 class MetricsCollector:
     """Centralized metrics collection for NOVUS."""
@@ -250,6 +258,10 @@ class MetricsCollector:
         status_class = f"{status // 100}xx"
         API_REQUESTS.labels(method=method, endpoint=endpoint, status=status_class).inc()
         API_REQUEST_DURATION.labels(method=method, endpoint=endpoint).observe(duration)
+
+    def record_runtime_span(self, span_name: str, status: str = "ok") -> None:
+        """Record span-style runtime event counts."""
+        RUNTIME_SPANS.labels(span_name=span_name, status=status).inc()
     
     def get_metrics(self) -> bytes:
         """Get metrics in Prometheus format."""

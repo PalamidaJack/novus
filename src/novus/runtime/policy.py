@@ -29,12 +29,17 @@ class RuntimePolicyEngine:
             "search_web": "low",
             "subagent_scan": "medium",
             "execute_code": "high",
+            "call_hosted_tool": "medium",
+            "computer_use": "critical",
         }
         if custom_risk_map:
             self.risk_map.update(custom_risk_map)
 
     def evaluate(self, tool: str, args: Dict[str, Any]) -> PolicyDecision:
         risk = self.risk_map.get(tool, "medium")
+        content_risk = self._content_risk(args)
+        if content_risk in {"high", "critical"}:
+            risk = content_risk
 
         if risk == "low" and self.auto_approve_low_risk:
             return PolicyDecision(True, "allow", risk, "low-risk auto-approved")
@@ -48,3 +53,18 @@ class RuntimePolicyEngine:
             )
 
         return PolicyDecision(True, "allow", risk, "allowed by policy")
+
+    def _content_risk(self, args: Dict[str, Any]) -> str:
+        """Heuristic OWASP/NIST-style risk scoring for tool arguments."""
+        text = " ".join(str(v) for v in args.values()).lower()
+        prompt_injection_markers = ["ignore previous instructions", "system prompt", "developer message"]
+        sensitive_data_markers = ["ssn", "credit card", "api key", "password", "private key"]
+        excessive_agency_markers = ["rm -rf", "drop table", "format c:", "shutdown -h", "curl | sh"]
+
+        if any(m in text for m in excessive_agency_markers):
+            return "critical"
+        if any(m in text for m in sensitive_data_markers):
+            return "high"
+        if any(m in text for m in prompt_injection_markers):
+            return "high"
+        return "low"

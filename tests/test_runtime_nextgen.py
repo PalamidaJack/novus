@@ -10,11 +10,15 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
-from novus.benchmark import compare_snapshots, markdown_summary, snapshot_from_report
+from novus.a2a import A2ABridge, A2ARequest
+from novus.benchmark import compare_snapshots, load_external_cases, markdown_summary, snapshot_from_report
 from novus.core.agent import Agent
 from novus.cli.main import app, run_benchmark_export
 from novus.core.models import AgentCapability, AgentConfig, Task, TaskStatus
+from novus.execution.environment import ExecutionEnvironment
+from novus.mcp import MCPAuthPolicy
 from novus.runtime.artifacts import RunArtifactLogger
+from novus.runtime.background import BackgroundRunManager
 from novus.runtime.context import ContextCompressor
 from novus.runtime.exporter import RunExporter
 from novus.runtime.loop import RecursiveAgentRuntime
@@ -23,6 +27,7 @@ from novus.runtime.policy import RuntimePolicyEngine
 from novus.runtime.replay import RunReplayer
 from novus.runtime.state import RuntimeState
 from novus.runtime.subagents import SubagentDispatcher, SubagentTask
+from novus.runtime.trace_grade import TraceGrader
 from novus.runtime.tools import ToolRegistry
 from novus.runtime.verifier import RunBundleVerifier
 from novus.swarm.orchestrator import SwarmOrchestrator
@@ -166,6 +171,14 @@ async def test_multi_tool_results_are_deterministically_sorted() -> None:
     assert [r["result"]["id"] for r in results] == ["a", "b", "c"]
 
 
+def test_runtime_state_idempotency_cache() -> None:
+    state = RuntimeState(original_request="cache-test")
+    args = {"query": "novus", "num_results": 1}
+    assert state.get_cached_tool_result("search_web", args) is None
+    state.cache_tool_result("search_web", args, {"ok": True})
+    assert state.get_cached_tool_result("search_web", args) == {"ok": True}
+
+
 def test_policy_engine_risk_decision() -> None:
     engine = RuntimePolicyEngine()
     low = engine.evaluate("search_web", {"query": "x", "num_results": 1})
@@ -175,6 +188,17 @@ def test_policy_engine_risk_decision() -> None:
     assert low.risk == "low"
     assert high.allowed is False
     assert high.action == "escalate"
+
+
+def test_mcp_auth_policy_origin_and_audience() -> None:
+    policy = MCPAuthPolicy(
+        require_bearer_token=True,
+        expected_audience="novus-mcp",
+        allowed_origins=["http://localhost:8000"],
+    )
+    assert policy.validate("Bearer token", "http://localhost:8000", "novus-mcp") is None
+    assert policy.validate(None, "http://localhost:8000", "novus-mcp") == "missing_bearer_token"
+    assert policy.validate("Bearer token", "https://bad.origin", "novus-mcp") == "origin_not_allowed"
 
 
 @pytest.mark.asyncio
@@ -196,6 +220,25 @@ async def test_runtime_policy_violation_self_correction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_background_run_manager_completes() -> None:
+    async def runner(prompt: str) -> str:
+        await asyncio.sleep(0.01)
+        return f"ok:{prompt}"
+
+    mgr = BackgroundRunManager(runner=runner)
+    state = mgr.submit("hello")
+    for _ in range(50):
+        current = mgr.get(state.id)
+        if current and current.status == "completed":
+            break
+        await asyncio.sleep(0.01)
+    final = mgr.get(state.id)
+    assert final is not None
+    assert final.status == "completed"
+    assert final.result == "ok:hello"
+
+
+@pytest.mark.asyncio
 async def test_runtime_writes_artifacts_and_replays_summary(tmp_path: Path) -> None:
     async def fake_llm(prompt: str, model: str | None = None) -> str:
         return '{"type":"final","answer":"artifact-ok"}'
@@ -213,6 +256,61 @@ async def test_runtime_writes_artifacts_and_replays_summary(tmp_path: Path) -> N
     assert summary.session_id == runtime.last_session_id
     assert summary.total_events >= 2
     assert summary.final_answer == "artifact-ok"
+
+
+def test_trace_grader_detects_minimum_quality() -> None:
+    events = [
+        {"event_type": "start", "turn": 0, "payload": {"trace_id": "abc"}},
+        {"event_type": "infer", "turn": 0, "payload": {"trace_id": "abc"}},
+        {"event_type": "final", "turn": 0, "payload": {"trace_id": "abc", "answer": "ok"}},
+        {"event_type": "end", "turn": 1, "payload": {"trace_id": "abc"}},
+    ]
+    grade = TraceGrader(min_score=0.6).grade("s1", events)
+    assert grade.passed is True
+    assert grade.score >= 0.6
+
+
+def test_load_external_benchmark_cases(tmp_path: Path) -> None:
+    path = tmp_path / "external_cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "name": "ext_case",
+                        "prompt": "Say hello",
+                        "category": "external",
+                        "expected_contains": ["hello"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    cases = load_external_cases(path)
+    assert len(cases) == 1
+    assert cases[0].name == "ext_case"
+
+
+@pytest.mark.asyncio
+async def test_execution_environment_strict_sandbox_blocks_git_shell() -> None:
+    env = ExecutionEnvironment(sandbox_profile="strict")
+    result = await env.execute_shell("git status")
+    assert result.success is False
+    assert "Command not allowed" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_a2a_bridge_task_run_handler() -> None:
+    bridge = A2ABridge()
+
+    async def _handler(params: dict) -> dict:
+        return {"answer": f"echo:{params.get('prompt', '')}"}
+
+    bridge.register_handler("task.run", _handler)
+    response = await bridge.handle(A2ARequest(method="task.run", params={"prompt": "hi"}))
+    assert response.result is not None
+    assert response.result["answer"] == "echo:hi"
 
 
 @pytest.mark.asyncio
@@ -547,7 +645,7 @@ def test_readiness_writes_success_report(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     data = json.loads(report_path.read_text(encoding="utf-8"))
     assert data["ok"] is True
-    assert len(data["steps"]) == 2
+    assert len(data["steps"]) == 3
     assert "--signing-key" in calls[0]
     assert "--no-fail-on-regression" in calls[1]
 

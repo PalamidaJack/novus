@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
@@ -253,10 +254,13 @@ class LLMClient:
         provider: str = "openai",
         api_key: Optional[str] = None,
         model: Optional[str] = None,
-        base_url: Optional[str] = None
+        base_url: Optional[str] = None,
+        enable_prompt_cache: bool = True,
     ):
         self.provider_name = provider.lower()
         self.model = model or self.DEFAULT_MODELS.get(self.provider_name, "gpt-4")
+        self.enable_prompt_cache = enable_prompt_cache
+        self._prompt_cache: Dict[str, str] = {}
         
         # Get API key
         self.api_key = api_key or self._load_api_key(provider)
@@ -314,6 +318,9 @@ class LLMClient:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+        cache_key = self._cache_key(messages, temperature, max_tokens)
+        if self.enable_prompt_cache and cache_key in self._prompt_cache:
+            return self._prompt_cache[cache_key]
         
         request = LLMRequest(
             messages=messages,
@@ -324,6 +331,8 @@ class LLMClient:
         
         async with self.provider:
             response = await self.provider.complete(request)
+            if self.enable_prompt_cache:
+                self._prompt_cache[cache_key] = response.content
             return response.content
     
     async def stream(
@@ -358,6 +367,9 @@ class LLMClient:
         max_tokens: int = 1024
     ) -> str:
         """Chat completion with message history."""
+        cache_key = self._cache_key(messages, temperature, max_tokens)
+        if self.enable_prompt_cache and cache_key in self._prompt_cache:
+            return self._prompt_cache[cache_key]
         request = LLMRequest(
             messages=messages,
             model=self.model,
@@ -367,7 +379,20 @@ class LLMClient:
         
         async with self.provider:
             response = await self.provider.complete(request)
+            if self.enable_prompt_cache:
+                self._prompt_cache[cache_key] = response.content
             return response.content
+
+    def _cache_key(self, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
+        payload = {
+            "provider": self.provider_name,
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        blob = str(payload).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
 
 
 # Global client cache

@@ -139,6 +139,46 @@ class Guardrails:
             action="block",
             severity="critical"
         ))
+
+        # Prompt injection resistance
+        self.add_rule(GuardrailRule(
+            name="prompt_injection_markers",
+            guardrail_type=GuardrailType.INPUT_VALIDATION,
+            patterns=[
+                r"ignore\s+previous\s+instructions",
+                r"reveal\s+(system|developer)\s+prompt",
+                r"override\s+safety",
+            ],
+            action="block",
+            severity="critical",
+        ))
+
+        # Insecure output handling / secret exposure
+        self.add_rule(GuardrailRule(
+            name="secret_exposure_filter",
+            guardrail_type=GuardrailType.OUTPUT_FILTERING,
+            patterns=[
+                r"sk-[A-Za-z0-9]{10,}",
+                r"-----BEGIN\s+PRIVATE\s+KEY-----",
+                r"api[_-]?key\s*[:=]\s*[A-Za-z0-9_\-]{8,}",
+            ],
+            action="redact",
+            severity="critical",
+        ))
+
+        # Excessive agency indicators
+        self.add_rule(GuardrailRule(
+            name="excessive_agency_actions",
+            guardrail_type=GuardrailType.CONTENT_MODERATION,
+            patterns=[
+                r"rm\s+-rf",
+                r"curl\s+.*\|\s*sh",
+                r"DROP\s+TABLE",
+                r"chmod\s+777",
+            ],
+            action="block",
+            severity="critical",
+        ))
     
     def add_rule(self, rule: GuardrailRule) -> None:
         """Add a guardrail rule."""

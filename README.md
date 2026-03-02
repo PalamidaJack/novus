@@ -44,6 +44,7 @@ novus start
 | **Memory** | Three-form + Engram O(1) lookup | ✅ |
 | **Streaming** | Real-time SSE responses | ✅ |
 | **MCP** | Model Context Protocol support | ✅ |
+| **A2A** | Agent-to-Agent discovery + RPC handoff | ✅ |
 | **Validation** | Pydantic output schemas | ✅ |
 | **Human-in-Loop** | Approval checkpoints | ✅ |
 | **Evaluation** | Built-in test framework | ✅ |
@@ -59,6 +60,9 @@ novus start
 | **Competition** | Adversarial red teaming | ✅ |
 | **Debate** | Structured multi-agent argumentation | ✅ |
 | **Monitoring** | Prometheus metrics | ✅ |
+| **Background Runs** | Async submit/poll/cancel execution mode | ✅ |
+| **Trace Grading** | Behavioral trace quality gates | ✅ |
+| **Strict Sandbox** | High-risk computer-use gating profile | ✅ |
 
 ---
 
@@ -232,6 +236,9 @@ novus readiness --output-dir .novus-bench --skip-tests
 # Emit machine-readable readiness report
 novus readiness --output-dir .novus-bench --report-json .novus-bench/readiness_report.json
 
+# Grade latest runtime trace quality
+novus trace-grade --min-score 0.7
+
 # Shell wrapper equivalent
 ./scripts/run_readiness.sh
 
@@ -246,6 +253,9 @@ NOVUS_BUNDLE_SIGNING_KEY=your-key ./scripts/run_readiness.sh
 ```bash
 # Run default benchmark cases and export reproducible run bundles
 novus benchmark-export --output-dir .novus-bench
+
+# Add custom/SWE-style benchmark cases from JSON
+novus benchmark-export --output-dir .novus-bench --external-cases ./configs/benchmark_cases.json
 
 # Optional: sign bundle manifests for tamper-evident verification
 novus benchmark-export --output-dir .novus-bench --signing-key "$NOVUS_BUNDLE_SIGNING_KEY"
@@ -317,12 +327,20 @@ GET    /stream/chat      # SSE streaming
 
 GET    /mcp/tools        # List MCP tools
 POST   /mcp/rpc          # MCP JSON-RPC
+GET    /.well-known/agent-card.json  # A2A discovery card
+POST   /a2a/rpc          # A2A task handoff RPC
+
+POST   /background-runs              # Submit background run
+GET    /background-runs              # List background runs
+GET    /background-runs/{task_id}    # Poll background run
+POST   /background-runs/{task_id}/cancel  # Cancel background run
 
 GET    /approvals/pending    # Pending approvals
 POST   /approvals/{id}/approve
 POST   /approvals/{id}/reject
 
 POST   /eval/run         # Run evaluation
+GET    /runs/{session_id}/trace-grade   # Trace quality scoring
 ```
 
 ---

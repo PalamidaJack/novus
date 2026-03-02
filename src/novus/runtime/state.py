@@ -33,6 +33,8 @@ class RuntimeState:
     """Durable state for long-running agent loops."""
 
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    thread_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    checkpoint_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = field(default_factory=_utcnow_iso)
     updated_at: str = field(default_factory=_utcnow_iso)
 
@@ -41,10 +43,15 @@ class RuntimeState:
     decisions: List[str] = field(default_factory=list)
     modified_files: List[str] = field(default_factory=list)
     tool_events: List[Dict[str, Any]] = field(default_factory=list)
+    tool_idempotency: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def mark_updated(self) -> None:
         self.updated_at = _utcnow_iso()
+
+    def rotate_checkpoint(self) -> None:
+        self.checkpoint_id = str(uuid.uuid4())
+        self.mark_updated()
 
     def append_decision(self, decision: str) -> None:
         self.decisions.append(decision)
@@ -84,6 +91,17 @@ class RuntimeState:
         )
         self.mark_updated()
 
+    def idempotency_key(self, tool: str, args: Dict[str, Any]) -> str:
+        canonical_args = json.dumps(args, sort_keys=True, default=str)
+        return f"{tool}:{canonical_args}"
+
+    def cache_tool_result(self, tool: str, args: Dict[str, Any], result: Any) -> None:
+        self.tool_idempotency[self.idempotency_key(tool, args)] = result
+        self.mark_updated()
+
+    def get_cached_tool_result(self, tool: str, args: Dict[str, Any]) -> Any:
+        return self.tool_idempotency.get(self.idempotency_key(tool, args))
+
     def to_prompt_block(self) -> str:
         lines = ["[CURRENT PLAN STATUS]"]
         for item in self.plan:
@@ -103,6 +121,8 @@ class RuntimeState:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "session_id": self.session_id,
+            "thread_id": self.thread_id,
+            "checkpoint_id": self.checkpoint_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "original_request": self.original_request,
@@ -110,6 +130,7 @@ class RuntimeState:
             "decisions": self.decisions,
             "modified_files": self.modified_files,
             "tool_events": self.tool_events,
+            "tool_idempotency": self.tool_idempotency,
             "metadata": self.metadata,
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -122,12 +143,15 @@ class RuntimeState:
         payload = json.loads(path.read_text(encoding="utf-8"))
         state = cls(
             session_id=payload.get("session_id", str(uuid.uuid4())),
+            thread_id=payload.get("thread_id", str(uuid.uuid4())),
+            checkpoint_id=payload.get("checkpoint_id", str(uuid.uuid4())),
             created_at=payload.get("created_at", _utcnow_iso()),
             updated_at=payload.get("updated_at", _utcnow_iso()),
             original_request=payload.get("original_request", ""),
             decisions=payload.get("decisions", []),
             modified_files=payload.get("modified_files", []),
             tool_events=payload.get("tool_events", []),
+            tool_idempotency=payload.get("tool_idempotency", {}),
             metadata=payload.get("metadata", {}),
         )
         state.plan = [PlanItem(**i) for i in payload.get("plan", [])]

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+import json
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, List
 from novus.benchmark.trends import (
@@ -83,6 +85,26 @@ def default_cases() -> List[BenchmarkCase]:
     ]
 
 
+def load_external_cases(path: Path) -> List[BenchmarkCase]:
+    """Load benchmark cases from JSON for SWE-style or custom suites."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    cases: List[BenchmarkCase] = []
+    for idx, item in enumerate(payload.get("cases", [])):
+        expected_contains = [str(x) for x in item.get("expected_contains", [])]
+        case_name = str(item.get("name", f"external_{idx}"))
+        prompt = str(item.get("prompt", ""))
+        category = str(item.get("category", "external"))
+        cases.append(
+            BenchmarkCase(
+                name=case_name,
+                prompt=prompt,
+                category=category,
+                check=lambda out, expected=expected_contains: all(tok in out for tok in expected),
+            )
+        )
+    return cases
+
+
 __all__ = [
     "BenchmarkCase",
     "BenchmarkResult",
@@ -95,4 +117,5 @@ __all__ = [
     "save_snapshot",
     "snapshot_from_report",
     "default_cases",
+    "load_external_cases",
 ]

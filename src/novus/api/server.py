@@ -24,13 +24,16 @@ from novus.world_model.engine import WorldModel, WorldModelPlanner
 from novus.monitoring import METRICS
 from novus.streaming import StreamingAgent, stream_to_sse
 from novus.mcp import mcp_router, get_mcp_server
+from novus.a2a import a2a_router, get_a2a_bridge, get_agent_card
 from novus.human_in_loop import approval_router, get_approval_manager
 from novus.eval import Evaluator, create_math_suite
 from novus.benchmark import BenchmarkHarness, default_cases
 from novus.runtime.artifacts import RunArtifactLogger
 from novus.runtime.exporter import RunExporter
 from novus.runtime.replay import RunReplayer
+from novus.runtime.trace_grade import TraceGrader
 from novus.runtime.verifier import RunBundleVerifier
+from novus.runtime.background import BackgroundRunManager
 from pydantic import BaseModel
 
 logger = structlog.get_logger()
@@ -80,12 +83,13 @@ artifact_logger = RunArtifactLogger()
 run_replayer = RunReplayer()
 run_exporter = RunExporter(artifact_logger=artifact_logger)
 run_verifier = RunBundleVerifier()
+background_runs: Optional[BackgroundRunManager] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    global swarm, world_model, world_model_planner
+    global swarm, world_model, world_model_planner, background_runs
     
     # Startup
     logger.info("starting_novus_api")
@@ -100,6 +104,29 @@ async def lifespan(app: FastAPI):
     # Initialize world model
     world_model = WorldModel()
     world_model_planner = WorldModelPlanner(world_model)
+
+    bridge = get_a2a_bridge()
+
+    async def _handle_a2a_task_run(params: Dict[str, Any]) -> Dict[str, Any]:
+        from novus.core.agent import Agent
+        from novus.core.models import AgentConfig
+
+        prompt = str(params.get("prompt", "")).strip()
+        if not prompt:
+            return {"error": "missing prompt"}
+        agent = Agent(AgentConfig(name="A2AAgent"))
+        answer = await agent.run(prompt)
+        return {"answer": answer}
+
+    bridge.register_handler("task.run", _handle_a2a_task_run)
+    from novus.core.agent import Agent
+    from novus.core.models import AgentConfig
+
+    background_agent = Agent(AgentConfig(name="BackgroundAgent"))
+    background_runs = BackgroundRunManager(
+        runner=background_agent.run,
+        session_getter=background_agent.get_last_session_id,
+    )
     
     logger.info("novus_api_started")
     
@@ -433,9 +460,15 @@ async def get_metrics():
     )
 
 
+@app.get("/.well-known/agent-card.json")
+async def well_known_agent_card():
+    return get_agent_card(base_url="http://localhost:8000")
+
+
 # Include additional routers
 app.include_router(mcp_router)
 app.include_router(approval_router)
+app.include_router(a2a_router)
 
 
 @app.websocket("/ws")
@@ -516,6 +549,35 @@ class RunVerifyResponse(BaseModel):
     errors: List[str]
 
 
+class RunTraceGradeResponse(BaseModel):
+    session_id: str
+    score: float
+    max_score: float
+    passed: bool
+    reasons: List[str]
+    metrics: Dict[str, Any]
+
+
+class BackgroundTaskRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=10000)
+
+
+class BackgroundTaskResponse(BaseModel):
+    task_id: str
+    status: str
+    created_at: str
+
+
+class BackgroundTaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    created_at: str
+    updated_at: str
+    result: Optional[str] = None
+    error: Optional[str] = None
+    session_id: Optional[str] = None
+
+
 @app.post("/eval/run", response_model=EvalResponse)
 async def run_evaluation():
     """Run evaluation suite on agents."""
@@ -570,6 +632,65 @@ async def run_benchmark():
             for r in report.results
         ],
     }
+
+
+@app.post("/background-runs", response_model=BackgroundTaskResponse)
+async def submit_background_run(request: BackgroundTaskRequest):
+    """Submit a long-running background agent task."""
+    if background_runs is None:
+        raise HTTPException(status_code=503, detail="Background manager not initialized")
+    state = background_runs.submit(request.prompt)
+    return {
+        "task_id": state.id,
+        "status": state.status,
+        "created_at": state.created_at,
+    }
+
+
+@app.get("/background-runs", response_model=List[BackgroundTaskStatusResponse])
+async def list_background_runs(limit: int = 50):
+    if background_runs is None:
+        raise HTTPException(status_code=503, detail="Background manager not initialized")
+    return [
+        {
+            "task_id": item.id,
+            "status": item.status,
+            "created_at": item.created_at,
+            "updated_at": item.updated_at,
+            "result": item.result,
+            "error": item.error,
+            "session_id": item.session_id,
+        }
+        for item in background_runs.list(limit=limit)
+    ]
+
+
+@app.get("/background-runs/{task_id}", response_model=BackgroundTaskStatusResponse)
+async def get_background_run(task_id: str):
+    if background_runs is None:
+        raise HTTPException(status_code=503, detail="Background manager not initialized")
+    item = background_runs.get(task_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Background task not found")
+    return {
+        "task_id": item.id,
+        "status": item.status,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "result": item.result,
+        "error": item.error,
+        "session_id": item.session_id,
+    }
+
+
+@app.post("/background-runs/{task_id}/cancel")
+async def cancel_background_run(task_id: str):
+    if background_runs is None:
+        raise HTTPException(status_code=503, detail="Background manager not initialized")
+    cancelled = background_runs.cancel(task_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="Background task not found or already finished")
+    return {"task_id": task_id, "cancelled": True}
 
 
 @app.get("/runs", response_model=List[str])
@@ -636,6 +757,15 @@ async def verify_run_bundle(session_id: str, signing_key: Optional[str] = None):
         "signature_ok": result.signature_ok,
         "errors": result.errors,
     }
+
+
+@app.get("/runs/{session_id}/trace-grade", response_model=RunTraceGradeResponse)
+async def grade_run_trace(session_id: str, min_score: float = 0.7):
+    events = artifact_logger.read(session_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="Run not found")
+    grade = TraceGrader(min_score=min_score).grade(session_id=session_id, events=events)
+    return grade.to_dict()
 
 
 # Run server if executed directly

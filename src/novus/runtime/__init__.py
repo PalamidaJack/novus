@@ -1,6 +1,7 @@
 """Runtime package for recursive agent execution."""
 
 from novus.runtime.artifacts import RunArtifactLogger, RunEvent
+from novus.runtime.background import BackgroundRunManager, BackgroundTaskState
 from novus.runtime.context import ContextCompressor, LayeredMemoryManager
 from novus.runtime.exporter import ExportResult, RunExporter
 from novus.runtime.interrupts import InterruptQueue
@@ -13,11 +14,14 @@ from novus.runtime.router import RuntimeModelRouter
 from novus.runtime.state import PlanItem, RuntimeState
 from novus.runtime.subagents import SubagentDispatcher, SubagentTask, SubagentResult
 from novus.runtime.tools import ToolRegistry, ToolValidationResult
+from novus.runtime.trace_grade import TraceGrade, TraceGrader
 from novus.runtime.verifier import RunBundleVerifier, VerificationResult
 
 __all__ = [
     "ContextCompressor",
     "BenchmarkRunManifest",
+    "BackgroundRunManager",
+    "BackgroundTaskState",
     "ExportResult",
     "InterruptQueue",
     "LayeredMemoryManager",
@@ -39,6 +43,8 @@ __all__ = [
     "SubagentResult",
     "ToolRegistry",
     "ToolValidationResult",
+    "TraceGrade",
+    "TraceGrader",
     "VerificationResult",
     "MANIFEST_SCHEMA_VERSION",
 ]

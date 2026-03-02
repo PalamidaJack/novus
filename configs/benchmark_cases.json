@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {
+      "name": "custom_reasoning_sample",
+      "prompt": "Return exactly: hello novus",
+      "category": "custom_reasoning",
+      "expected_contains": ["hello", "novus"]
+    },
+    {
+      "name": "swe_style_stub",
+      "prompt": "Identify the likely root cause and fix strategy for a failing test in a Python module.",
+      "category": "swe_style",
+      "expected_contains": ["root cause", "fix"]
+    }
+  ]
+}

@@ -50,11 +50,15 @@ class ExecutionEnvironment:
         max_execution_time: float = 30.0,
         max_output_size: int = 1_000_000,
         allow_network: bool = True,
-        sandbox_dir: Optional[str] = None
+        sandbox_dir: Optional[str] = None,
+        sandbox_profile: str = "standard",
+        allow_computer_use: bool = False,
     ):
         self.max_execution_time = max_execution_time
         self.max_output_size = max_output_size
         self.allow_network = allow_network
+        self.sandbox_profile = sandbox_profile
+        self.allow_computer_use = allow_computer_use
         
         # Create sandbox directory
         self.sandbox_dir = Path(sandbox_dir or tempfile.mkdtemp(prefix="novus_sandbox_"))
@@ -62,7 +66,9 @@ class ExecutionEnvironment:
         logger.info(
             "execution_environment_initialized",
             sandbox_dir=str(self.sandbox_dir),
-            allow_network=allow_network
+            allow_network=allow_network,
+            sandbox_profile=sandbox_profile,
+            allow_computer_use=allow_computer_use,
         )
     
     async def execute_code(
@@ -234,10 +240,9 @@ except Exception as e:
         Only allows whitelisted commands for safety.
         """
         # Whitelist of safe commands
-        allowed_commands = {
-            "ls", "cat", "head", "tail", "grep", "wc", "find", "echo",
-            "python3", "pip3", "git"
-        }
+        standard_commands = {"ls", "cat", "head", "tail", "grep", "wc", "find", "echo", "python3", "pip3", "git"}
+        strict_commands = {"ls", "cat", "head", "tail", "grep", "wc", "find", "echo"}
+        allowed_commands = strict_commands if self.sandbox_profile == "strict" else standard_commands
         
         # Parse command
         parts = command.strip().split()
@@ -280,6 +285,37 @@ except Exception as e:
                 output=None,
                 error=str(e)
             )
+
+    async def call_hosted_tool(self, endpoint: str, payload: Dict[str, Any], method: str = "POST") -> Dict[str, Any]:
+        """Call a hosted tool/API endpoint with bounded response capture."""
+        if not self.allow_network:
+            return {"ok": False, "error": "network_disabled", "endpoint": endpoint}
+
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                if method.upper() == "GET":
+                    resp = await client.get(endpoint, params=payload)
+                else:
+                    resp = await client.request(method.upper(), endpoint, json=payload)
+            body = resp.text
+            if len(body) > self.max_output_size:
+                body = body[: self.max_output_size] + "... [truncated]"
+            return {
+                "ok": resp.status_code < 400,
+                "status": resp.status_code,
+                "endpoint": endpoint,
+                "body": body,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "endpoint": endpoint}
+
+    async def computer_use_action(self, action: str, params: Optional[Dict[str, Any]] = None) -> ExecutionResult:
+        """Explicit high-risk interface for desktop/browser control operations."""
+        if not self.allow_computer_use:
+            return ExecutionResult(success=False, output=None, error="computer_use_disabled")
+        return ExecutionResult(success=True, output={"action": action, "params": params or {}, "status": "stubbed"})
     
     def cleanup(self) -> None:
         """Clean up sandbox directory."""
@@ -293,6 +329,8 @@ except Exception as e:
         return {
             "sandbox_dir": str(self.sandbox_dir),
             "allow_network": self.allow_network,
+            "sandbox_profile": self.sandbox_profile,
+            "allow_computer_use": self.allow_computer_use,
             "max_execution_time": self.max_execution_time,
             "max_output_size": self.max_output_size,
         }

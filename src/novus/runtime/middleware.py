@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List
 
+from novus.monitoring import METRICS
+
 
 @dataclass
 class RuntimeHookContext:
@@ -42,3 +44,28 @@ class RuntimeMiddleware:
     async def run_after_tool(self, ctx: RuntimeHookContext) -> None:
         for hook in self.after_tool_hooks:
             await hook(ctx)
+
+
+class OTelLikeRuntimeObserver:
+    """Best-effort OTEL semantic convention adapter."""
+
+    async def before_infer(self, ctx: RuntimeHookContext) -> None:
+        METRICS.record_runtime_span("agent.infer.start", status="ok")
+
+    async def after_infer(self, ctx: RuntimeHookContext) -> None:
+        METRICS.record_runtime_span("agent.infer.end", status="ok")
+
+    async def after_tool(self, ctx: RuntimeHookContext) -> None:
+        status = "ok"
+        payload = ctx.payload or {}
+        if "error" in str(payload.get("result", "")).lower():
+            status = "error"
+        METRICS.record_runtime_span("agent.tool", status=status)
+
+
+def with_default_observer(middleware: RuntimeMiddleware) -> RuntimeMiddleware:
+    observer = OTelLikeRuntimeObserver()
+    middleware.on_before_infer(observer.before_infer)
+    middleware.on_after_infer(observer.after_infer)
+    middleware.on_after_tool(observer.after_tool)
+    return middleware

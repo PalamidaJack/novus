@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -12,7 +13,7 @@ import structlog
 from novus.execution.environment import ExecutionEnvironment
 from novus.runtime.context import ContextCompressor, LayeredMemoryManager
 from novus.runtime.interrupts import InterruptQueue
-from novus.runtime.middleware import RuntimeHookContext, RuntimeMiddleware
+from novus.runtime.middleware import RuntimeHookContext, RuntimeMiddleware, with_default_observer
 from novus.runtime.policy import RuntimePolicyEngine
 from novus.runtime.router import RuntimeModelRouter
 from novus.runtime.artifacts import RunArtifactLogger, RunEvent, now_iso
@@ -42,7 +43,7 @@ class RecursiveAgentRuntime:
         self.execution_env = execution_env or ExecutionEnvironment()
         self.state_dir = Path(state_dir or Path.home() / ".novus" / "sessions")
         self.router = router or RuntimeModelRouter()
-        self.middleware = middleware or RuntimeMiddleware()
+        self.middleware = with_default_observer(middleware or RuntimeMiddleware())
         self.interrupts = interrupts or InterruptQueue()
         self.memory = LayeredMemoryManager()
         self.compressor = ContextCompressor()
@@ -59,7 +60,17 @@ class RecursiveAgentRuntime:
         state = RuntimeState(original_request=prompt)
         state.ensure_plan(prompt)
         self.last_session_id = state.session_id
-        self._log_event(state.session_id, 0, "start", {"prompt": prompt, "task_type": task_type})
+        self._log_event(
+            state.session_id,
+            0,
+            "start",
+            {
+                "prompt": prompt,
+                "task_type": task_type,
+                "thread_id": state.thread_id,
+                "checkpoint_id": state.checkpoint_id,
+            },
+        )
 
         messages = [
             {
@@ -83,6 +94,7 @@ class RecursiveAgentRuntime:
         return result
 
     async def _loop(self, messages: list[dict], state: RuntimeState, turn: int, task_type: str) -> Any:
+        state.rotate_checkpoint()
         if turn >= self.max_turns:
             self._log_event(state.session_id, turn, "error_max_turns", {"message": "Reached max turns"})
             return "Reached max turns"
@@ -214,7 +226,7 @@ class RecursiveAgentRuntime:
             messages.append({"role": "system", "content": state.to_prompt_block()})
             return await self._loop(messages=messages, state=state, turn=turn + 1, task_type=task_type)
 
-        tool_results = await self._execute_tool_calls(validated_calls)
+        tool_results = await self._execute_tool_calls(validated_calls, state=state)
         self._log_event(state.session_id, turn, "multi_tool_result", {"results": tool_results})
         for entry in tool_results:
             state.add_tool_event(entry["tool"], entry["args"], entry["result"])
@@ -311,15 +323,37 @@ class RecursiveAgentRuntime:
             results = await self.subagents.dispatch_many(tasks, depth=0)
             return [r.__dict__ for r in results]
 
+        if name == "call_hosted_tool":
+            endpoint = args.get("endpoint", "")
+            payload = args.get("payload", {})
+            method = args.get("method", "POST")
+            return await self.execution_env.call_hosted_tool(endpoint=endpoint, payload=payload, method=method)
+
         return {"error": f"Unknown tool: {name}"}
 
-    async def _execute_tool_calls(self, calls: list[tuple[int, str, Dict[str, Any]]]) -> list[Dict[str, Any]]:
+    async def _execute_tool_calls(
+        self,
+        calls: list[tuple[int, str, Dict[str, Any]]],
+        state: Optional[RuntimeState] = None,
+    ) -> list[Dict[str, Any]]:
         sem = asyncio.Semaphore(self.max_parallel_tools)
 
         async def _run(index: int, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
+            if state is not None:
+                cached = state.get_cached_tool_result(tool, args)
+                if cached is not None:
+                    return {
+                        "index": index,
+                        "tool": tool,
+                        "args": args,
+                        "result": cached,
+                        "idempotent_cache_hit": True,
+                    }
             async with sem:
                 result = await self._execute_tool(tool, args)
-                return {"index": index, "tool": tool, "args": args, "result": result}
+                if state is not None:
+                    state.cache_tool_result(tool, args, result)
+                return {"index": index, "tool": tool, "args": args, "result": result, "idempotent_cache_hit": False}
 
         results = await asyncio.gather(*[_run(i, t, a) for i, t, a in calls])
         # Deterministic order by original tool-call index.
@@ -327,13 +361,14 @@ class RecursiveAgentRuntime:
         return results
 
     def _log_event(self, session_id: str, turn: int, event_type: str, payload: Dict[str, Any]) -> None:
+        trace_id = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
         self.artifact_logger.write(
             RunEvent(
                 event_type=event_type,
                 session_id=session_id,
                 turn=turn,
                 timestamp=now_iso(),
-                payload=payload,
+                payload={"trace_id": trace_id, "group_id": session_id, **payload},
             )
         )
 

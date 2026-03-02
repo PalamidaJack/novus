@@ -22,6 +22,12 @@ class SubagentScanArgs(BaseModel):
     prompts: list[str] = Field(min_length=1, max_length=16)
 
 
+class HostedToolArgs(BaseModel):
+    endpoint: str = Field(min_length=1)
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    method: str = Field(default="POST")
+
+
 @dataclass
 class ToolValidationResult:
     valid: bool
@@ -38,6 +44,7 @@ class ToolRegistry:
             "search_web": SearchWebArgs,
             "execute_code": ExecuteCodeArgs,
             "subagent_scan": SubagentScanArgs,
+            "call_hosted_tool": HostedToolArgs,
         }
 
     def list_tools(self) -> list[str]:

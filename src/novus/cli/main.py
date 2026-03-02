@@ -29,6 +29,7 @@ from novus.benchmark import (
     BenchmarkHarness,
     compare_snapshots,
     default_cases,
+    load_external_cases,
     load_snapshot,
     markdown_summary,
     save_snapshot,
@@ -40,6 +41,7 @@ from novus.world_model.engine import WorldModel, WorldModelPlanner
 from novus.runtime.artifacts import RunArtifactLogger
 from novus.runtime.exporter import RunExporter
 from novus.runtime.replay import RunReplayer
+from novus.runtime.trace_grade import TraceGrader
 from novus.runtime.verifier import RunBundleVerifier
 
 # Rich console
@@ -66,6 +68,7 @@ async def run_benchmark_export(
     max_case_latency_regression_pct: float = 300.0,
     allow_case_pass_failures: int = 0,
     category_thresholds_path: Optional[Path] = None,
+    external_cases_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Run default benchmark cases, export bundles, and verify reproducibility."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -83,7 +86,10 @@ async def run_benchmark_export(
         return out
 
     harness = BenchmarkHarness(runner=runner)
-    report = await harness.run(default_cases())
+    cases = default_cases()
+    if external_cases_path and external_cases_path.exists():
+        cases.extend(load_external_cases(external_cases_path))
+    report = await harness.run(cases)
 
     exporter = RunExporter(export_dir=bundles_dir, signing_key=signing_key)
     verifier = RunBundleVerifier()
@@ -657,6 +663,8 @@ def readiness(
     skip_tests: bool = typer.Option(False, "--skip-tests", help="Skip pytest step"),
     skip_benchmark_export: bool = typer.Option(False, "--skip-benchmark-export", help="Skip benchmark export step"),
     skip_benchmark_evaluate: bool = typer.Option(False, "--skip-benchmark-evaluate", help="Skip benchmark evaluate step"),
+    skip_trace_grade: bool = typer.Option(False, "--skip-trace-grade", help="Skip trace grading step"),
+    min_trace_score: float = typer.Option(0.7, "--min-trace-score", help="Minimum acceptable trace score"),
     report_json: str = typer.Option("", "--report-json", help="Optional JSON report output path"),
 ):
     """Run local readiness pipeline: tests + benchmark export + benchmark evaluation."""
@@ -708,6 +716,16 @@ def readiness(
                 eval_cmd,
             )
         )
+    if not skip_trace_grade:
+        trace_cmd = [
+            sys.executable,
+            "-m",
+            "novus.cli",
+            "trace-grade",
+            "--min-score",
+            str(min_trace_score),
+        ]
+        steps.append(("Trace Grade", trace_cmd))
 
     if not steps:
         console.print("[yellow]No readiness steps selected.[/yellow]")
@@ -763,6 +781,35 @@ def readiness(
             ),
             encoding="utf-8",
         )
+
+
+@app.command("trace-grade")
+def trace_grade(
+    session_id: str = typer.Option("", "--session-id", help="Optional session ID to grade; defaults to latest"),
+    min_score: float = typer.Option(0.7, "--min-score", help="Minimum acceptable score"),
+):
+    """Grade runtime traces to detect behavioral regressions."""
+    logger = RunArtifactLogger()
+    sessions = [session_id] if session_id else logger.list_sessions(limit=1)
+    if not sessions:
+        console.print("[bold red]No run sessions found.[/bold red]")
+        raise typer.Exit(1)
+
+    target = sessions[0]
+    events = logger.read(target)
+    grade = TraceGrader(min_score=min_score).grade(target, events)
+
+    table = Table(title=f"Trace Grade: {target}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Score", f"{grade.score:.2f} / {grade.max_score:.2f}")
+    table.add_row("Passed", "YES" if grade.passed else "NO")
+    table.add_row("Events", str(grade.metrics.get("total_events", 0)))
+    table.add_row("Trace ID Coverage", f"{float(grade.metrics.get('trace_id_coverage', 0.0)):.2%}")
+    table.add_row("Reasons", "; ".join(grade.reasons) if grade.reasons else "(none)")
+    console.print(table)
+    if not grade.passed:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -896,6 +943,11 @@ def benchmark_export(
         "--category-thresholds",
         help="Optional JSON file with per-category regression budgets",
     ),
+    external_cases: str = typer.Option(
+        "",
+        "--external-cases",
+        help="Optional JSON file containing additional benchmark cases",
+    ),
     fail_on_regression: bool = typer.Option(
         False,
         "--fail-on-regression/--no-fail-on-regression",
@@ -915,6 +967,7 @@ def benchmark_export(
             max_case_latency_regression_pct=max_case_latency_regression_pct,
             allow_case_pass_failures=allow_case_pass_failures,
             category_thresholds_path=Path(category_thresholds) if category_thresholds else None,
+            external_cases_path=Path(external_cases) if external_cases else None,
         )
     )
 
