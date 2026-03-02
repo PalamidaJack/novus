@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  novus:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: novus
+    ports:
+      - "8000:8000"
+    environment:
+      - NOVUS_HOST=0.0.0.0
+      - NOVUS_PORT=8000
+      - NOVUS_DEBUG=false
+      - NOVUS_LOG_LEVEL=INFO
+    volumes:
+      - novus_data:/data
+      - novus_logs:/logs
+      - novus_config:/config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+  # Redis for message queue and caching
+  redis:
+    image: redis:7-alpine
+    container_name: novus-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # Optional: Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: novus-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+volumes:
+  novus_data:
+  novus_logs:
+  novus_config:
+  redis_data:
+  prometheus_data:
+
+networks:
+  default:
+    name: novus-network

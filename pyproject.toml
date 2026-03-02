@@ -1,0 +1,146 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "novus"
+version = "0.1.0"
+description = "NOVUS: Next-Generation Agentic AI Platform for Autonomous Innovation"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0.0",
+    "aiohttp>=3.9.0",
+    "aioredis>=2.0.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    "aiosqlite>=0.20.0",
+    "numpy>=1.26.0",
+    "networkx>=3.2.0",
+    "structlog>=24.1.0",
+    "prometheus-client>=0.19.0",
+    "opentelemetry-api>=1.22.0",
+    "opentelemetry-sdk>=1.22.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "typer>=0.9.0",
+    "rich>=13.7.0",
+    "tenacity>=8.2.0",
+    "python-json-logger>=2.0.7",
+    "cryptography>=42.0.0",
+    "pyjwt>=2.8.0",
+    "aiofiles>=23.2.0",
+    "watchdog>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-xdist>=3.5.0",
+    "black>=24.1.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+    "pre-commit>=3.6.0",
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
+]
+web = [
+    "selenium>=4.17.0",
+    "playwright>=1.41.0",
+    "beautifulsoup4>=4.12.0",
+    "scrapy>=2.11.0",
+]
+science = [
+    "scipy>=1.12.0",
+    "pandas>=2.2.0",
+    "scikit-learn>=1.4.0",
+    "matplotlib>=3.8.0",
+    "plotly>=5.18.0",
+]
+all = [
+    "novus[dev,web,science]"
+]
+
+[project.scripts]
+novus = "novus.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/novus-ai/novus"
+Documentation = "https://docs.novus.ai"
+Repository = "https://github.com/novus-ai/novus"
+Issues = "https://github.com/novus-ai/novus/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/novus"]
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["novus"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+[tool.coverage.run]
+source = ["src/novus"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]

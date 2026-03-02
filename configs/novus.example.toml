@@ -1,0 +1,47 @@
+# NOVUS Configuration
+
+[server]
+host = "0.0.0.0"
+port = 8000
+workers = 4
+timeout = 300
+
+[swarm]
+min_agents = 3
+max_agents = 100
+target_agent_count = 10
+enable_evolution = false
+evolution_interval_seconds = 3600
+selection_pressure = 0.3
+mutation_rate = 0.1
+
+[execution]
+max_execution_time = 30
+max_output_size = 1048576
+allow_network = true
+sandbox_dir = "/tmp/novus_sandbox"
+
+[memory]
+max_entries = 10000
+embedding_dim = 1536
+cache_ttl_hours = 1
+
+[world_model]
+state_dim = 512
+action_dim = 128
+hidden_dim = 256
+prediction_steps = 10
+
+[api]
+cors_origins = ["*"]
+rate_limit = 100
+rate_limit_period = 60
+
+[logging]
+level = "INFO"
+format = "json"
+output = "stdout"
+
+[monitoring]
+enable_prometheus = true
+prometheus_port = 9090
