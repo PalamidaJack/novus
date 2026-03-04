@@ -9,3 +9,15 @@ build/
 .coverage
 htmlcov/
 node_modules/
+
+# Environment variables
+.env
+.env.*
+.env.local
+.env.production
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
